@@ -16,7 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.db import Base
+from plugfit.app.db.db import Base
 from plugfit.app.utils.db import new_uuid, new_api_key, utcnow
 
 
@@ -66,6 +66,11 @@ class User(Base):
         unique=True,
         nullable=False,
         index=True,
+    )
+
+    password_hash: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
     )
 
     # not sure if i want to keep it
