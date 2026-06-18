@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
 
-    JWT_SECRET: str = Field(default_factory=lambda: secrets.token_hex(32))
+    JWT_SECRET: str = Field(default_factory=lambda: secrets.token_hex(64))
 
     JWT_ALGORITHM: str = Field(default="HS256")
 
