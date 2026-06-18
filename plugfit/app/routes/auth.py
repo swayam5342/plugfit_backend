@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from plugfit.app.config import settings
 from plugfit.app.db.db import get_db
 from plugfit.app.models.models import User
-from plugfit.app.schema.auth import Token, TokenData, UserCreate, UserOut
+from plugfit.app.schema.auth import Token, UserCreate, UserOut
 from plugfit.app.utils.auth import (
     TokenError,
     create_access_token,
@@ -38,7 +38,9 @@ async def _get_user_by_id(db: AsyncSession, user_id: str) -> User | None:
     return result.scalar_one_or_none()
 
 
-async def _authenticate_user(db: AsyncSession, email: str, password: str) -> User | None:
+async def _authenticate_user(
+    db: AsyncSession, email: str, password: str
+) -> User | None:
     user = await _get_user_by_email(db, email)
     if not user or not verify_password(password, user.password_hash):
         return None
@@ -46,13 +48,17 @@ async def _authenticate_user(db: AsyncSession, email: str, password: str) -> Use
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
 ) -> User:
     try:
         payload = decode_access_token(token)
+
         user_id = payload.get("sub")
+
         if not user_id:
             raise TokenError("Missing subject")
+
     except TokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -61,12 +67,14 @@ async def get_current_user(
         ) from exc
 
     user = await _get_user_by_id(db, user_id)
+
     if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
     return user
 
 
@@ -91,7 +99,7 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)) -> U
         password_hash=hash_password(user_in.password),
     )
     db.add(user)
-    await db.flush()
+    await db.commit()
     await db.refresh(user)
     return user
 
@@ -101,7 +109,12 @@ async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> Token:
-    user = await _authenticate_user(db, form_data.username, form_data.password)
+    user = await _authenticate_user(
+        db,
+        form_data.username,
+        form_data.password,
+    )
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -109,8 +122,14 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = create_access_token(subject=user.id, expires_delta=timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
-    return Token(access_token=token)
+    access_token = create_access_token(
+        subject=user.id,
+        expires_delta=timedelta(
+            minutes=settings.JWT_EXPIRE_MINUTES,
+        ),
+    )
+
+    return Token(access_token=access_token)
 
 
 @router.get("/me", response_model=UserOut)

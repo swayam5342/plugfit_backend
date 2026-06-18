@@ -32,7 +32,9 @@ class Settings(BaseSettings):
 
     MCP_BASE_PATH: str = Field(default="/mcp")
 
-    CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    CORS_ORIGINS: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "*"]
+    )
 
 
 @lru_cache
