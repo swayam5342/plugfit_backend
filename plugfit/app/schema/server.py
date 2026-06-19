@@ -32,3 +32,46 @@ class ServerOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ScoreSummary(BaseModel):
+    """Compact score card — used by the dashboard."""
+
+    server_id: str
+    name: str
+    score_before: float | None
+    score_after: float | None
+    delta: float | None
+    tool_count_before: int | None
+    tool_count_after: int | None
+    status: str
+
+
+class JobOut(BaseModel):
+    id: str
+    server_id: str
+    status: str
+    stage: str
+    logs: list[dict]
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ToolDiff(BaseModel):
+    name: str
+    description_before: str | None
+    description_after: str | None
+    param_count: int
+    changed: bool
+
+
+class ManifestDiff(BaseModel):
+    server_id: str
+    tools_before: int
+    tools_after: int
+    tools_removed: list[str]
+    tools_merged: list[str]
+    diffs: list[ToolDiff]
