@@ -11,6 +11,9 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+    HOST: str = Field(default="http://localhost")
+
+    PORT: str = Field(default="8067")
 
     DATABASE_URL: str = Field(default="sqlite+aiosqlite:///./plugfit_dev.db")
 
@@ -43,7 +46,7 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type:ignore
 
 
 settings = get_settings()

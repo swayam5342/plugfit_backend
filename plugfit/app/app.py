@@ -5,6 +5,7 @@ from .config import settings
 from .db.db import init_db
 from .routes.auth import router as authrouter
 from .routes.server import router as serverrouter
+from .routes.mcp import router as mcprouter
 
 
 @asynccontextmanager
@@ -33,6 +34,7 @@ app.add_middleware(
 
 app.include_router(authrouter, prefix="/auth")
 app.include_router(serverrouter)
+app.include_router(mcprouter)
 
 
 @app.get("/", tags=["health"])

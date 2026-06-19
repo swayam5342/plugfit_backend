@@ -8,7 +8,7 @@ async def run_pipeline_async(server_id: str, job_id: str) -> str:
     try:
         from .tasks import run_pipeline
 
-        result = run_pipeline.delay(server_id, job_id)
+        result = run_pipeline.delay(server_id, job_id)  # type:ignore
         log.info("Enqueued pipeline task %s for server %s", result.id, server_id[:8])
         return "celery"
     except Exception as e:
@@ -23,7 +23,7 @@ def _run_inline(server_id: str, job_id: str) -> None:
     from .tasks import run_pipeline
 
     try:
-        run_pipeline(server_id=server_id, job_id=job_id)
+        run_pipeline(server_id=server_id, job_id=job_id)  # type:ignore
     except Exception as e:
         log.error("Inline pipeline failed: %s", e)
 
