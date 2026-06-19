@@ -227,7 +227,7 @@ class Server(Base):
 
     @property
     def mcp_path(self) -> str:
-        return f"/mcp/{self.user.slug}/{self.slug}"
+        return f"/mcp/{self.user_id}/{self.id}"
 
     def __repr__(self) -> str:
         return f"<Server {self.slug}>"

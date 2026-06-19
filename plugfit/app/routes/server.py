@@ -29,7 +29,7 @@ from plugfit.app.models.models import (
     User,
 )
 from plugfit.app.db.db import get_db
-from plugfit.app.job.task import run_pipeline_task
+from plugfit.app.job.tasks import run_pipeline
 from plugfit.app.schema.server import (
     JobOut,
     ManifestDiff,
@@ -89,7 +89,7 @@ async def create_server(
             detail="Provide exactly one of spec_file or spec_url",
         )
 
-    from app.config import settings
+    from plugfit.app.config import settings
 
     if spec_file is not None:
         raw_bytes = await spec_file.read()
@@ -127,7 +127,7 @@ async def create_server(
             detail=f"Could not parse spec: {e}",
         )
 
-    from app.config import settings as cfg
+    from plugfit.app.config import settings as cfg
 
     if len(manifest.tools) > cfg.MAX_TOOLS_PER_SPEC:
         raise HTTPException(
@@ -137,7 +137,7 @@ async def create_server(
             ),
         )
     server = Server(
-        tenant_id=tenant.id,
+        user_id=tenant.id,
         name=name,
         slug=_slugify(name),
         status=ServerStatus.PROCESSING,
@@ -162,7 +162,7 @@ async def create_server(
 
     await db.commit()
     await db.refresh(server)
-    run_pipeline_task.delay(server.id, job.id)
+    run_pipeline.delay(server.id, job.id)
 
     return _server_out(server)
 
@@ -314,7 +314,7 @@ async def reprocess(
     await db.flush()
     await db.commit()
     await db.refresh(job)
-    run_pipeline_task.delay(server.id, job.id)
+    run_pipeline.delay(server.id, job.id)
     return JobOut.model_validate(job)
 
 
