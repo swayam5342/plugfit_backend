@@ -25,7 +25,10 @@ class Settings(BaseSettings):
 
     JWT_EXPIRE_MINUTES: int = Field(default=60 * 24 * 7)
 
+    PASSWORD_RESET_TIME: int = Field(default=10)
+
     API_KEY_PREFIX: str = Field(default="pf_")
+
     GEMINI_API_KEY: str = Field()
 
     MAX_SPEC_SIZE_BYTES: int = Field(default=5 * 1024 * 1024)
@@ -37,6 +40,7 @@ class Settings(BaseSettings):
     PIPELINE_MAX_RETRY: int = Field(default=3)
 
     PIPELINE_WORKERS: int = Field(default=1)
+
     MCP_BASE_PATH: str = Field(default="/mcp")
 
     CORS_ORIGINS: list[str] = Field(
