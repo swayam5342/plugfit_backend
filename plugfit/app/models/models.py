@@ -291,3 +291,57 @@ class Job(Base):
 
     def __repr__(self) -> str:
         return f"<Job {self.id} {self.status.value}>"
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=new_uuid,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    replaced_by: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+
+    user: Mapped["User"] = relationship()
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and self.expires_at > utcnow()
+
+    def __repr__(self) -> str:
+        return f"<RefreshToken {self.id} user={self.user_id} active={self.is_active}>"

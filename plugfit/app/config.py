@@ -23,9 +23,19 @@ class Settings(BaseSettings):
 
     JWT_ALGORITHM: str = Field(default="HS256")
 
-    JWT_EXPIRE_MINUTES: int = Field(default=60 * 24 * 7)
+    JWT_ACCESS_EXPIRE_MINUTES: int = 15
+
+    JWT_REFRESH_EXPIRE_DAYS: int = 30
+
+    REFRESH_TOKEN_SIZE: int = Field(default=128)
+
+    REFRESH_COOKIE_PATH: str = Field(default="/auth")
+
+    REFRESH_COOKIE_NAME: str = Field(default="refresh_token")
 
     PASSWORD_RESET_TIME: int = Field(default=10)
+
+    COOKIE_SECURE: bool = True
 
     API_KEY_PREFIX: str = Field(default="pf_")
 

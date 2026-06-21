@@ -3,7 +3,8 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
 from jose import JWTError, jwt
-
+import secrets
+import hashlib
 from plugfit.app.config import settings
 
 
@@ -37,7 +38,9 @@ def create_access_token(
 ) -> str:
     now = datetime.now(timezone.utc)
 
-    expire = now + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
+    expire = now + (
+        expires_delta or timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES)
+    )
 
     payload: dict[str, Any] = {
         "sub": subject,
@@ -67,3 +70,11 @@ def decode_access_token(token: str) -> dict[str, Any]:
         raise TokenError("Invalid token type")
 
     return payload
+
+
+def create_refresh_token() -> str:
+    return secrets.token_urlsafe(settings.REFRESH_TOKEN_SIZE)
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
