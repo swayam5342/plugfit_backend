@@ -25,6 +25,9 @@ class Settings(BaseSettings):
 
     JWT_EXPIRE_MINUTES: int = Field(default=60 * 24 * 7)
 
+    RESEND_API_KEY: str = Field(default="")
+    RESEND_FROM_EMAIL: str = Field(default="no-reply@example.com")
+
     API_KEY_PREFIX: str = Field(default="pf_")
     GEMINI_API_KEY: str = Field()
 

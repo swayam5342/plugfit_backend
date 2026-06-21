@@ -16,9 +16,19 @@ class UserOut(BaseModel):
     slug: str
     plan: str
     is_active: bool
+    is_email_verified: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class EmailVerificationRequest(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=4, max_length=64)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
 
 
 class Token(BaseModel):
