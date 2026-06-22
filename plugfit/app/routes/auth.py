@@ -2,29 +2,32 @@ import re
 import secrets
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from plugfit.app.config import settings
 from plugfit.app.db.db import get_db
-from plugfit.app.models.models import User
 from plugfit.app.schema.auth import (
     ResendVerificationRequest,
     Token,
     UserCreate,
     UserOut,
 )
+from plugfit.app.models.models import RefreshToken, User
 from plugfit.app.utils.auth import (
     TokenError,
     create_access_token,
+    create_refresh_token,
     decode_access_token,
     hash_password,
+    hash_refresh_token,
     verify_password,
     create_verification_token,
     decode_verification_token,
 )
+from plugfit.app.utils.db import utcnow
 
 from plugfit.app.utils.db import utcnow
 from ...app.utils.email import send_verification_email
@@ -32,6 +35,9 @@ from ...app.utils.email import send_verification_email
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+REFRESH_COOKIE_NAME = "refresh_token"
+REFRESH_COOKIE_PATH = "/auth"
 
 
 def _make_slug(value: str) -> str:
@@ -75,12 +81,9 @@ async def get_current_user(
 ) -> User:
     try:
         payload = decode_access_token(token)
-
         user_id = payload.get("sub")
-
         if not user_id:
             raise TokenError("Missing subject")
-
     except TokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -89,15 +92,50 @@ async def get_current_user(
         ) from exc
 
     user = await _get_user_by_id(db, user_id)
-
     if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
     return user
+
+
+def _set_refresh_cookie(response: Response, raw_token: str) -> None:
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=raw_token,
+        httponly=True,
+        secure=settings.COOKIE_SECURE,
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 60 * 60,
+        path=REFRESH_COOKIE_PATH,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(key=REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
+
+
+async def _issue_token_pair(
+    db: AsyncSession, user: User, response: Response
+) -> tuple[Token, RefreshToken]:
+    access_token = create_access_token(
+        subject=user.id,
+        expires_delta=timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES),
+    )
+
+    raw_refresh = create_refresh_token()
+    refresh_row = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(raw_refresh),
+        expires_at=utcnow() + timedelta(days=settings.JWT_REFRESH_EXPIRE_DAYS),
+    )
+    db.add(refresh_row)
+    await db.commit()
+    await db.refresh(refresh_row)
+    _set_refresh_cookie(response, raw_refresh)
+    return Token(access_token=access_token), refresh_row
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -187,15 +225,11 @@ async def resend_verification(
 
 @router.post("/login", response_model=Token)
 async def login(
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> Token:
-    user = await _authenticate_user(
-        db,
-        form_data.username,
-        form_data.password,
-    )
-
+    user = await _authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -215,9 +249,73 @@ async def login(
         expires_delta=timedelta(
             minutes=settings.JWT_EXPIRE_MINUTES,
         ),
+    token, _ = await _issue_token_pair(db, user, response)
+    return token
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> Token:
+    invalid = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
-    return Token(access_token=access_token)
+    raw_token = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not raw_token:
+        raise invalid
+
+    token_hash = hash_refresh_token(raw_token)
+    result = await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+    )
+    stored = result.scalar_one_or_none()
+
+    if not stored:
+        raise invalid
+
+    if stored.revoked_at is not None:
+        _clear_refresh_cookie(response)
+        raise invalid
+
+    if stored.expires_at <= utcnow():
+        raise invalid
+
+    user = await _get_user_by_id(db, stored.user_id)
+    if not user or not user.is_active:
+        raise invalid
+
+    new_token, new_row = await _issue_token_pair(db, user, response)
+
+    stored.revoked_at = utcnow()
+    stored.replaced_by = new_row.id
+    await db.commit()
+
+    return new_token
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    raw_token = request.cookies.get(REFRESH_COOKIE_NAME)
+    if raw_token:
+        token_hash = hash_refresh_token(raw_token)
+        result = await db.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        )
+        stored = result.scalar_one_or_none()
+        if stored and stored.revoked_at is None:
+            stored.revoked_at = utcnow()
+            await db.commit()
+
+    _clear_refresh_cookie(response)
 
 
 @router.get("/me", response_model=UserOut)

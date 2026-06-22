@@ -4,6 +4,9 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
 from jose import JWTError, jwt, exceptions
 from ...app.utils.db import utcnow
+from jose import JWTError, jwt
+import secrets
+import hashlib
 from plugfit.app.config import settings
 
 
@@ -37,7 +40,9 @@ def create_access_token(
 ) -> str:
     now = datetime.now(timezone.utc)
 
-    expire = now + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
+    expire = now + (
+        expires_delta or timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES)
+    )
 
     payload: dict[str, Any] = {
         "sub": subject,
@@ -89,3 +94,9 @@ def decode_verification_token(token: str) -> dict:
         return payload
     except exceptions.ExpiredSignatureError:
         raise TokenError("Token has expired")
+def create_refresh_token() -> str:
+    return secrets.token_urlsafe(settings.REFRESH_TOKEN_SIZE)
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
