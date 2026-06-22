@@ -11,7 +11,6 @@ from plugfit.app.config import settings
 from plugfit.app.db.db import get_db
 from plugfit.app.models.models import User
 from plugfit.app.schema.auth import (
-    EmailVerificationRequest,
     ResendVerificationRequest,
     Token,
     UserCreate,
@@ -57,10 +56,6 @@ async def _authenticate_user(
     if not user or not verify_password(password, user.password_hash):
         return None
     return user
-
-
-def _generate_email_verification_otp() -> str:
-    return f"{secrets.randbelow(1000000):06d}"
 
 
 def _send_verification_email(email: str):
@@ -125,10 +120,10 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)) -> U
         slug=slug,
         password_hash=hash_password(user_in.password),
     )
+    _send_verification_email(user_in.email)
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    _send_verification_email(user_in.email)
 
     return user
 

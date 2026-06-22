@@ -3,7 +3,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
 from jose import JWTError, jwt, exceptions
-from db import utcnow
+from ...app.utils.db import utcnow
 from plugfit.app.config import settings
 
 

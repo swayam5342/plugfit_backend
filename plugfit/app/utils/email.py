@@ -24,14 +24,10 @@ def send_verification_email(email: str, magic_link: str, otp_expire: int):
         "template": {
             "id": "magic-link-sign-in",
             "variables": {
-                "data": {
-                    "first_name": email,
-                    "company_name": "PlugFit",
-                    "magic_link": magic_link,
-                    "VERIFICATION_EXPIRE": str(
-                        settings.VERIFICATION_TOKEN_EXPIRE_MINUTES
-                    ),
-                },
+                "first_name": email,
+                "company_name": "PlugFit",
+                "magic_link_url": magic_link,
+                "VERIFICATION_EXPIRE": str(settings.VERIFICATION_TOKEN_EXPIRE_MINUTES),
             },
         },
     }
