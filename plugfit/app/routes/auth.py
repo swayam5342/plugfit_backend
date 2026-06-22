@@ -1,8 +1,5 @@
-import json
 import re
 import secrets
-import urllib.error
-import urllib.request
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -26,8 +23,13 @@ from plugfit.app.utils.auth import (
     decode_access_token,
     hash_password,
     verify_password,
+    create_verification_token,
+    decode_verification_token,
 )
+
 from plugfit.app.utils.db import utcnow
+from ...app.utils.email import send_verification_email
+
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -61,78 +63,15 @@ def _generate_email_verification_otp() -> str:
     return f"{secrets.randbelow(1000000):06d}"
 
 
-def _send_verification_email(email: str, otp: str) -> None:
-    if not settings.RESEND_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Email delivery is not configured. Set RESEND_API_KEY.",
-        )
-
-    payload = {
-        "from": settings.RESEND_FROM_EMAIL,
-        "to": [email],
-        "subject": "Verify your email",
-        "html": (
-            f"<p>Use the code below to verify your email address:</p>"
-            f"<p><strong>{otp}</strong></p>"
-            f"<p>If you did not request this, please ignore this email.</p>"
-        ),
-    }
-    
-    print(f"DEBUG: RESEND_FROM_EMAIL={settings.RESEND_FROM_EMAIL}")
-    print(f"DEBUG: RESEND_API_KEY_PREFIX={settings.RESEND_API_KEY[:10]}")
-    print(f"DEBUG: Sending email from {settings.RESEND_FROM_EMAIL} to {email}")
-    print(f"DEBUG: API Key set: {bool(settings.RESEND_API_KEY)}")
-    print(f"DEBUG: API Key length: {len(settings.RESEND_API_KEY)}")
-    
-    req = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.RESEND_API_KEY}",
-        },
-        method="POST",
+def _send_verification_email(email: str):
+    token = create_verification_token(
+        email=email,
+        expires_delta=timedelta(minutes=settings.VERIFICATION_TOKEN_EXPIRE_MINUTES),
     )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            response_body = resp.read().decode("utf-8", errors="ignore")
-            try:
-                resp_headers = dict(resp.getheaders())
-            except Exception:
-                resp_headers = {}
-            print(f"DEBUG: Response status: {resp.status}")
-            print(f"DEBUG: Response headers: {resp_headers}")
-            print(f"DEBUG: Response body (full): {response_body}")
-            if resp.status >= 400:
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"Resend API error (HTTP {resp.status}): {response_body}",
-                )
-    except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
-        try:
-            exc_headers = dict(exc.headers) if exc.headers is not None else {}
-        except Exception:
-            exc_headers = {}
-        print(f"DEBUG: HTTPError status: {getattr(exc, 'code', 'N/A')}")
-        print(f"DEBUG: HTTPError headers: {exc_headers}")
-        print(f"DEBUG: HTTPError body (full): {error_body}")
-        error_detail = (
-            f"Resend API error (HTTP {getattr(exc, 'code', 'N/A')}): {error_body}"
-            if error_body
-            else f"Resend API error (HTTP {getattr(exc, 'code', 'N/A')})"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=error_detail,
-        ) from exc
-    except urllib.error.URLError as exc:
-        print(f"DEBUG: URLError: {str(exc)}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Email delivery service is unavailable: {str(exc)}",
-        ) from exc
+    magic_link = f"{settings.FRONTEND_URL}/auth/verify-email?token={token}"
+    send_verification_email(
+        email, magic_link, settings.VERIFICATION_TOKEN_EXPIRE_MINUTES
+    )
 
 
 async def get_current_user(
@@ -180,62 +119,51 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)) -> U
     if result.scalar_one_or_none():
         slug = f"{slug}-{secrets.token_hex(4)}"
 
-    otp = _generate_email_verification_otp()
-    expires_at = utcnow() + timedelta(minutes=15)
-
     user = User(
         name=user_in.name,
         email=user_in.email,
         slug=slug,
         password_hash=hash_password(user_in.password),
-        email_verification_otp=otp,
-        email_verification_otp_expires_at=expires_at,
     )
-
-    _send_verification_email(user_in.email, otp)
-
     db.add(user)
     await db.commit()
     await db.refresh(user)
+    _send_verification_email(user_in.email)
+
     return user
 
 
-@router.post("/verify-email")
+@router.get("/verify-email")
 async def verify_email(
-    payload: EmailVerificationRequest,
+    token: str,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
-    user = await _get_user_by_email(db, payload.email)
+    try:
+        payload = decode_verification_token(token)
+    except TokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid token",
+        )
+
+    user = await _get_user_by_email(db, email)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid email or OTP",
+            detail="User not found",
         )
 
     if user.is_email_verified:
-        return {"detail": "Email is already verified."}
-
-    if not user.email_verification_otp or not user.email_verification_otp_expires_at:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No active verification OTP found.",
-        )
-
-    if user.email_verification_otp != payload.otp:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid email or OTP",
-        )
-
-    if utcnow() > user.email_verification_otp_expires_at:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Verification code has expired.",
-        )
+        return {"detail": "Email already verified."}
 
     user.is_email_verified = True
-    user.email_verification_otp = None
-    user.email_verification_otp_expires_at = None
     db.add(user)
     await db.commit()
 
@@ -257,17 +185,9 @@ async def resend_verification(
     if user.is_email_verified:
         return {"detail": "Email is already verified."}
 
-    otp = _generate_email_verification_otp()
-    expires_at = utcnow() + timedelta(minutes=15)
+    _send_verification_email(user.email)
 
-    user.email_verification_otp = otp
-    user.email_verification_otp_expires_at = expires_at
-    db.add(user)
-    await db.commit()
-
-    _send_verification_email(user.email, otp)
-
-    return {"detail": "Verification email resent."}
+    return {"detail": "Verification email sent."}
 
 
 @router.post("/login", response_model=Token)

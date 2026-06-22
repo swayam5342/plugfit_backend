@@ -100,18 +100,6 @@ class User(Base):
         default=False,
     )
 
-    email_verification_otp: Mapped[str | None] = mapped_column(
-        String(64),
-        nullable=True,
-        default=None,
-    )
-
-    email_verification_otp_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        default=None,
-    )
-
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

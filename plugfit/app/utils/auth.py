@@ -2,8 +2,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
-from jose import JWTError, jwt
-
+from jose import JWTError, jwt, exceptions
+from db import utcnow
 from plugfit.app.config import settings
 
 
@@ -67,3 +67,25 @@ def decode_access_token(token: str) -> dict[str, Any]:
         raise TokenError("Invalid token type")
 
     return payload
+
+
+def create_verification_token(email: str, expires_delta: timedelta) -> str:
+    expire = utcnow() + expires_delta
+    payload = {
+        "sub": email,
+        "purpose": "email-verification",
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+
+def decode_verification_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(
+            token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]
+        )
+        if payload.get("purpose") != "email-verification":
+            raise TokenError("Invalid token purpose")
+        return payload
+    except exceptions.ExpiredSignatureError:
+        raise TokenError("Token has expired")

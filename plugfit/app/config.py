@@ -26,9 +26,17 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = Field(default=60 * 24 * 7)
 
     RESEND_API_KEY: str = Field(default="")
+
     RESEND_FROM_EMAIL: str = Field(default="no-reply@example.com")
 
+    OTP_EXPIRE: int = Field(default=10)
+
     API_KEY_PREFIX: str = Field(default="pf_")
+
+    VERIFICATION_TOKEN_EXPIRE_MINUTES: int = Field(default=10)
+
+    FRONTEND_URL: str = Field(default="http://localhost:3000")
+
     GEMINI_API_KEY: str = Field()
 
     MAX_SPEC_SIZE_BYTES: int = Field(default=5 * 1024 * 1024)
