@@ -70,9 +70,7 @@ def _send_verification_email(email: str):
         expires_delta=timedelta(minutes=settings.VERIFICATION_TOKEN_EXPIRE_MINUTES),
     )
     magic_link = f"{settings.FRONTEND_URL}/auth/verify-email?token={token}"
-    send_verification_email(
-        email, magic_link, settings.VERIFICATION_TOKEN_EXPIRE_MINUTES
-    )
+    send_verification_email(email, magic_link)
 
 
 async def get_current_user(
@@ -244,11 +242,6 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token = create_access_token(
-        subject=user.id,
-        expires_delta=timedelta(
-            minutes=settings.JWT_EXPIRE_MINUTES,
-        ),
     token, _ = await _issue_token_pair(db, user, response)
     return token
 

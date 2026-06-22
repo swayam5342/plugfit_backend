@@ -10,11 +10,10 @@ from ...app.models.password_reset import PasswordResetToken
 from ...app.schema.auth import ForgotPasswordRequest, ResetPasswordRequest
 from ...app.utils.token_reset import generate_reset_token, hash_token
 from ...app.utils.auth import hash_password
+from ...app.utils.email import send_password_reset_email
 from ...app.config import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-GENERIC_RESPONSE = {"message": "If that email exists, a reset link has been sent."}
 
 
 @router.post("/forgot-password")
@@ -35,11 +34,9 @@ async def forgot_password(
         )
         db.add(reset_entry)
         await db.commit()
-
-        # @shreyasmenon29 to be implimented sending mail
-        #! send_mail.delay(user.email, raw_token)
-
-    return GENERIC_RESPONSE
+        send_password_reset_email(
+            username=user.email, email=user.email, reset_link=raw_token
+        )
 
 
 @router.post("/reset-password")
