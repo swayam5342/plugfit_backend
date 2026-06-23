@@ -70,7 +70,13 @@ class User(Base):
 
     password_hash: Mapped[str] = mapped_column(
         String(128),
-        nullable=False,
+        nullable=True,
+    )
+
+    oauth_accounts: Mapped[list["OAuthAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     # not sure if i want to keep it
@@ -351,3 +357,33 @@ class RefreshToken(Base):
 
     def __repr__(self) -> str:
         return f"<RefreshToken {self.id} user={self.user_id} active={self.is_active}>"
+
+
+class OAuthAccount(Base):
+    __tablename__ = "oauth_accounts"
+
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_user_id", name="uq_oauth_provider_uid"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=new_uuid,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    provider_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_email: Mapped[str] = mapped_column(String(254), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="oauth_accounts")
+
+    def __repr__(self) -> str:
+        return f"<OAuthAccount {self.provider}:{self.provider_user_id} user={self.user_id}>"
