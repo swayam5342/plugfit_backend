@@ -1,12 +1,18 @@
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, ConfigDict
 
 
 class UserCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     email: EmailStr
     password: str = Field(..., min_length=8)
+
+
+class OAuthAccountOut(BaseModel):
+    provider: str
+    provider_email: str
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserOut(BaseModel):
@@ -18,7 +24,7 @@ class UserOut(BaseModel):
     is_active: bool
     is_email_verified: bool
     created_at: datetime
-
+    oauth_accounts: list[OAuthAccountOut] = []
     model_config = {"from_attributes": True}
 
 

@@ -33,6 +33,12 @@ class Settings(BaseSettings):
 
     REFRESH_COOKIE_NAME: str = Field(default="refresh_token")
 
+    GOOGLE_CLIENT_ID: str
+
+    GOOGLE_CLIENT_SECRET: str
+
+    GOOGLE_REDIRECT_URI: str
+
     PASSWORD_RESET_TIME: int = Field(default=10)
 
     COOKIE_SECURE: bool = True
@@ -49,7 +55,7 @@ class Settings(BaseSettings):
 
     FRONTEND_URL: str = Field(default="http://localhost:3000")
 
-    GEMINI_API_KEY: str = Field()
+    GEMINI_API_KEY: str
 
     MAX_SPEC_SIZE_BYTES: int = Field(default=5 * 1024 * 1024)
 
