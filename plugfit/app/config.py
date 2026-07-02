@@ -1,5 +1,4 @@
 from functools import lru_cache
-import secrets
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,7 +18,7 @@ class Settings(BaseSettings):
 
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
 
-    JWT_SECRET: str = Field(default_factory=lambda: secrets.token_hex(64))
+    JWT_SECRET: str = Field(default="dev-change-in-prod")
 
     JWT_ALGORITHM: str = Field(default="HS256")
 
