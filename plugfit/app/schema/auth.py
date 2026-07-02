@@ -69,3 +69,9 @@ class ResetPasswordRequest(BaseModel):
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters")
         return v
+
+
+class UserUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    email: EmailStr | None = None
+    password: str | None = Field(None, min_length=8)

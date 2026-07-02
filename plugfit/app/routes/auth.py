@@ -14,6 +14,7 @@ from plugfit.app.schema.auth import (
     Token,
     UserCreate,
     UserOut,
+    UserUpdate,
 )
 from plugfit.app.models.models import RefreshToken, User, OAuthAccount
 from plugfit.app.utils.auth import (
@@ -478,4 +479,44 @@ async def _fetch_google_userinfo(access_token: str) -> dict:
 
 @router.get("/me", response_model=UserOut)
 async def read_current_user(current_user: User = Depends(get_current_user)) -> User:
+    return current_user
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_current_user(
+    payload: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if not any([payload.name, payload.email, payload.password]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No update fields provided.",
+        )
+
+    if payload.email and payload.email != current_user.email:
+        existing = await _get_user_by_email(db, payload.email)
+        if existing and existing.id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered",
+            )
+        current_user.email = payload.email
+        current_user.is_email_verified = False
+        _send_verification_email(payload.email)
+
+    if payload.name and payload.name != current_user.name:
+        slug = _make_slug(payload.name)
+        result = await db.execute(select(User).where(User.slug == slug))
+        if result.scalar_one_or_none():
+            slug = f"{slug}-{secrets.token_hex(4)}"
+        current_user.name = payload.name
+        current_user.slug = slug
+
+    if payload.password:
+        current_user.password_hash = hash_password(payload.password)
+
+    db.add(current_user)
+    await db.commit()
+    await db.refresh(current_user)
     return current_user
