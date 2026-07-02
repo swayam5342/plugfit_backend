@@ -1,19 +1,22 @@
 # app/api/routes/auth.py
 from datetime import datetime, timedelta, timezone
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...app.db.db import get_db
-from ...app.models.models import User
-from ...app.models.password_reset import PasswordResetToken
-from ...app.schema.auth import ForgotPasswordRequest, ResetPasswordRequest
-from ..utils.auth.token_reset import generate_reset_token, hash_token
-from ..utils.auth.token import hash_password
-from ..utils.email.email import send_password_reset_email
-from ...app.config import settings
+from ...db.db import get_db
+from ...models.models import User
+from ...models.password_reset import PasswordResetToken
+from ...schema.auth import ForgotPasswordRequest, ResetPasswordRequest
+from ...utils.auth.token_reset import generate_reset_token, hash_token
+from ...utils.auth.token import hash_password
+from ...utils.email import send_password_reset_email
+from ...config import settings
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
 
 
 @router.post("/forgot-password")
@@ -21,6 +24,7 @@ async def forgot_password(
     payload: ForgotPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info(f"Forgot password request for email: {payload.email}")
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
@@ -37,6 +41,9 @@ async def forgot_password(
         send_password_reset_email(
             username=user.email, email=user.email, reset_link=raw_token
         )
+        logger.info(f"Password reset email sent for user: {payload.email}")
+    else:
+        logger.debug(f"Forgot password request for non-existent email: {payload.email}")
 
 
 @router.post("/reset-password")
@@ -44,6 +51,7 @@ async def reset_password(
     payload: ResetPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.debug("Password reset attempt with provided token")
     token_hash = hash_token(payload.token)
 
     result = await db.execute(
@@ -56,15 +64,18 @@ async def reset_password(
         or reset_entry.used
         or reset_entry.expires_at < datetime.now(timezone.utc)
     ):
+        logger.warning("Password reset failed - invalid or expired token")
         raise HTTPException(status_code=400, detail="Invalid or expired token")
 
     user_result = await db.execute(select(User).where(User.id == reset_entry.user_id))
     user = user_result.scalar_one_or_none()
     if not user:
+        logger.warning("Password reset failed - user not found")
         raise HTTPException(status_code=400, detail="Invalid token")
 
     user.password_hash = hash_password(payload.new_password)
     reset_entry.used = True
 
     await db.commit()
+    logger.info(f"Password reset successfully for user: {user.email} (ID: {user.id})")
     return {"message": "Password reset successful"}

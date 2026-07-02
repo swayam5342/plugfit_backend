@@ -101,6 +101,7 @@ class HttpMcpSession:
 
 async def _load_server(tenant_id: str, server_id: str, db: AsyncSession) -> Server:
     """Load server, verify it belongs to tenant_id, verify it's READY."""
+    log.debug(f"Loading MCP server: {server_id}, tenant_id: {tenant_id}")
     result = await db.execute(
         select(Server).where(
             Server.id == server_id,
@@ -109,8 +110,10 @@ async def _load_server(tenant_id: str, server_id: str, db: AsyncSession) -> Serv
     )
     server = result.scalar_one_or_none()
     if not server:
+        log.warning(f"MCP server not found: {server_id}, tenant_id: {tenant_id}")
         raise HTTPException(404, detail="MCP server not found")
     if server.status not in (ServerStatus.READY, ServerStatus.PROCESSING):
+        log.warning(f"MCP server not ready: {server_id}, status: {server.status}")
         raise HTTPException(503, detail=f"Server not ready (status: {server.status})")
     return server
 
@@ -122,9 +125,11 @@ async def mcp_post(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    log.debug(f"MCP POST request: tenant_id={tenant_id}, server_id={server_id}")
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        log.warning(f"MCP POST failed - invalid JSON: {str(e)}")
         return JSONResponse(
             err(None, -32700, "Invalid JSON"),
             status_code=400,
@@ -134,6 +139,7 @@ async def mcp_post(
     session = HttpMcpSession(server)
 
     if isinstance(body, list):
+        log.debug(f"MCP batch request with {len(body)} messages")
         responses = [session.dispatch(msg) for msg in body]
         responses = [r for r in responses if r is not None]
         return JSONResponse(responses)
@@ -141,6 +147,7 @@ async def mcp_post(
     response = session.dispatch(body)
     if response is None:
         # Notification — 202 No Content
+        log.debug(f"MCP notification processed")
         return Response(status_code=202)
 
     return JSONResponse(response)
@@ -152,10 +159,11 @@ async def mcp_info(
     server_id: str,
     db: AsyncSession = Depends(get_db),
 ):
+    log.debug(f"MCP info request: tenant_id={tenant_id}, server_id={server_id}")
     server = await _load_server(tenant_id, server_id, db)
     manifest = server.cleaned_manifest or server.raw_manifest or {}
     tools = manifest.get("tools", [])
-
+    log.debug(f"MCP info retrieved - {len(tools)} tools, status: {server.status}")
     return {
         "server_id": server_id,
         "name": server.name,
@@ -187,22 +195,30 @@ async def mcp_stream(
     server_id: str,
     db: AsyncSession = Depends(get_db),
 ):
+    log.info(
+        f"MCP stream connection initiated: tenant_id={tenant_id}, server_id={server_id}"
+    )
     server = await _load_server(tenant_id, server_id, db)
 
     async def event_stream():
         import asyncio
 
-        data = json.dumps(
-            {
-                "type": "connected",
-                "server": server.name,
-                "tools": server.tool_count_after or server.tool_count_before,
-            }
-        )
-        yield f"data: {data}\n\n"
-        while True:
-            await asyncio.sleep(15)
-            yield ": keepalive\n\n"
+        try:
+            data = json.dumps(
+                {
+                    "type": "connected",
+                    "server": server.name,
+                    "tools": server.tool_count_after or server.tool_count_before,
+                }
+            )
+            yield f"data: {data}\n\n"
+            log.debug(f"MCP stream connected - server: {server.name}")
+            while True:
+                await asyncio.sleep(15)
+                yield ": keepalive\n\n"
+        except Exception as e:
+            log.error(f"MCP stream error: {str(e)}")
+            raise
 
     return StreamingResponse(
         event_stream(),

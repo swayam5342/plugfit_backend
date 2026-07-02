@@ -6,12 +6,23 @@ from .db.db import init_db
 from .routes.auth import router as authrouter
 from .routes.server import router as serverrouter
 from .routes.mcp import router as mcprouter
+from plugfit.app.logging import setup_logging
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
+
+    logger.info("Starting application")
+
     await init_db()
+
     yield
+
+    logger.info("Shutting down application")
 
 
 app = FastAPI(
@@ -39,6 +50,7 @@ app.include_router(mcprouter)
 
 @app.get("/", tags=["health"])
 async def root():
+    logger.info("Health check: root endpoint called")
     return {
         "service": "PlugFit Platform",
         "version": "0.1.0",
@@ -48,4 +60,5 @@ async def root():
 
 @app.get("/health", tags=["health"])
 async def health():
+    logger.info("Health check: /health endpoint called")
     return {"status": "ok"}

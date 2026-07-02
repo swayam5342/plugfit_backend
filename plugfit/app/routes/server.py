@@ -11,6 +11,7 @@ DELETE /servers/{id}         — delete a server
 """
 
 import json
+import logging
 import re
 from typing import Tuple
 
@@ -37,6 +38,8 @@ from plugfit.app.schema.server import (
     ServerOut,
     ToolDiff,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -83,7 +86,11 @@ async def create_server(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ServerOut:
+    logger.info(f"Server creation request: name='{name}', user_id={tenant.id}")
     if (spec_file is None) == (spec_url is None):
+        logger.warning(
+            f"Server creation failed - ambiguous spec source (file={spec_file is not None}, url={spec_url is not None})"
+        )
         raise HTTPException(
             status_code=400,
             detail="Provide exactly one of spec_file or spec_url",
@@ -92,9 +99,13 @@ async def create_server(
     from plugfit.app.config import settings
 
     if spec_file is not None:
+        logger.debug(f"Processing uploaded spec file: {spec_file.filename}")
         raw_bytes = await spec_file.read()
 
         if len(raw_bytes) > settings.MAX_SPEC_SIZE_BYTES:
+            logger.warning(
+                f"Server creation failed - spec file too large: {len(raw_bytes)} bytes (max: {settings.MAX_SPEC_SIZE_BYTES})"
+            )
             raise HTTPException(
                 413,
                 detail=f"Spec exceeds {settings.MAX_SPEC_SIZE_BYTES // 1024} KB limit",
@@ -107,6 +118,7 @@ async def create_server(
         )
 
     else:
+        logger.debug(f"Processing spec from URL: {spec_url}")
         ingest_input = spec_url
         raw_spec = spec_url
     headers: dict = {}
@@ -115,6 +127,7 @@ async def create_server(
         try:
             headers = json.loads(upstream_headers)
         except json.JSONDecodeError:
+            logger.warning(f"Server creation failed - invalid upstream_headers JSON")
             raise HTTPException(
                 400,
                 detail="upstream_headers must be valid JSON",
@@ -122,6 +135,7 @@ async def create_server(
     try:
         manifest = ingest(ingest_input)  # type:ignore
     except Exception as e:
+        logger.warning(f"Server creation failed - spec parsing error: {str(e)}")
         raise HTTPException(
             422,
             detail=f"Could not parse spec: {e}",
@@ -130,6 +144,9 @@ async def create_server(
     from plugfit.app.config import settings as cfg
 
     if len(manifest.tools) > cfg.MAX_TOOLS_PER_SPEC:
+        logger.warning(
+            f"Server creation failed - too many tools: {len(manifest.tools)} (max: {cfg.MAX_TOOLS_PER_SPEC})"
+        )
         raise HTTPException(
             422,
             detail=(
@@ -162,8 +179,10 @@ async def create_server(
 
     await db.commit()
     await db.refresh(server)
-    run_pipeline.delay(server.id, job.id)
-
+    run_pipeline.delay(server.id, job.id)  # type:ignore
+    logger.info(
+        f"Server created successfully: {name} (ID: {server.id}, tools: {len(manifest.tools)}, user_id: {tenant.id})"
+    )
     return _server_out(server)
 
 
@@ -176,12 +195,15 @@ async def list_servers(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ServerOut]:
+    logger.debug(f"Listing servers for user_id: {tenant.id}")
     result: Result[Tuple[Server]] = await db.execute(
         select(Server)
         .where(Server.user_id == tenant.id)
         .order_by(Server.created_at.desc())
     )
-    return [_server_out(s) for s in result.scalars().all()]
+    servers = [_server_out(s) for s in result.scalars().all()]
+    logger.debug(f"Found {len(servers)} servers for user_id: {tenant.id}")
+    return servers
 
 
 @router.get(
@@ -194,6 +216,7 @@ async def get_server(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ServerOut:
+    logger.debug(f"Fetching server: {server_id}, user_id: {tenant.id}")
     server: Server = await _get_server_for_tenant(server_id, tenant, db)
     return _server_out(server)
 
@@ -208,10 +231,16 @@ async def get_score(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ScoreSummary:
+    logger.debug(
+        f"Fetching score summary for server: {server_id}, user_id: {tenant.id}"
+    )
     server = await _get_server_for_tenant(server_id, tenant, db)
     delta = None
     if server.score_before is not None and server.score_after is not None:
         delta = server.score_after - server.score_before
+    logger.debug(
+        f"Score summary retrieved - before: {server.score_before}, after: {server.score_after}, delta: {delta}"
+    )
     return ScoreSummary(
         server_id=server.id,
         name=server.name,
@@ -234,8 +263,14 @@ async def get_diff(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ManifestDiff:
+    logger.debug(
+        f"Fetching manifest diff for server: {server_id}, user_id: {tenant.id}"
+    )
     server: Server = await _get_server_for_tenant(server_id, tenant, db)
     if not server.raw_manifest or not server.cleaned_manifest:
+        logger.warning(
+            f"Manifest diff requested but manifests not yet available: {server_id}"
+        )
         raise HTTPException(
             404, detail="Manifest not yet available — pipeline may still be running"
         )
@@ -266,7 +301,9 @@ async def get_diff(
                 changed=desc_before != desc_after,
             )
         )
-
+    logger.debug(
+        f"Manifest diff computed - tools: before={len(before_tools)}, after={len(after_tools)}, removed={len(removed)}"
+    )
     return ManifestDiff(
         server_id=server.id,
         tools_before=len(before_tools),
@@ -287,11 +324,14 @@ async def get_jobs(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    logger.debug(f"Fetching job history for server: {server_id}, user_id: {tenant.id}")
     server = await _get_server_for_tenant(server_id, tenant, db)
     result = await db.execute(
         select(Job).where(Job.server_id == server.id).order_by(Job.created_at.desc())
     )
-    return [JobOut.model_validate(j) for j in result.scalars().all()]
+    jobs = [JobOut.model_validate(j) for j in result.scalars().all()]
+    logger.debug(f"Job history retrieved - count: {len(jobs)}")
+    return jobs
 
 
 @router.post(
@@ -304,8 +344,10 @@ async def reprocess(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info(f"Reprocess request for server: {server_id}, user_id: {tenant.id}")
     server = await _get_server_for_tenant(server_id, tenant, db)
     if server.status == ServerStatus.PROCESSING:
+        logger.warning(f"Reprocess failed - pipeline already running: {server_id}")
         raise HTTPException(409, detail="Pipeline already running for this server")
 
     server.status = ServerStatus.PROCESSING
@@ -314,7 +356,8 @@ async def reprocess(
     await db.flush()
     await db.commit()
     await db.refresh(job)
-    run_pipeline.delay(server.id, job.id)
+    run_pipeline.delay(server.id, job.id)  # type:ignore
+    logger.info(f"Reprocess initiated - server: {server_id}, job_id: {job.id}")
     return JobOut.model_validate(job)
 
 
@@ -328,8 +371,10 @@ async def delete_server(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    logger.info(f"Delete server request: {server_id}, user_id: {tenant.id}")
     server: Server = await _get_server_for_tenant(server_id, tenant, db)
     await db.delete(server)
+    logger.info(f"Server deleted successfully: {server_id}")
 
 
 def _server_out(server: Server) -> ServerOut:
