@@ -72,6 +72,5 @@ class ResetPasswordRequest(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=120)
-    email: EmailStr | None = None
-    password: str | None = Field(None, min_length=8)
+    name: str | None = Field(None, min_length=6, max_length=120)
+    email: EmailStr | None

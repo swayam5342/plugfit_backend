@@ -6,7 +6,6 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from plugfit.app.config import settings
 from plugfit.app.db.db import get_db
 from plugfit.app.schema.auth import (
@@ -17,7 +16,7 @@ from plugfit.app.schema.auth import (
     UserUpdate,
 )
 from plugfit.app.models.models import RefreshToken, User, OAuthAccount
-from plugfit.app.utils.auth import (
+from plugfit.app.utils.auth.token import (
     TokenError,
     create_access_token,
     create_refresh_token,
@@ -28,16 +27,22 @@ from plugfit.app.utils.auth import (
     create_verification_token,
     decode_verification_token,
 )
-from plugfit.app.utils.db import utcnow
-from ...app.utils.email import send_verification_email
+from plugfit.app.utils.db.get_users import get_user_by_email, get_user_by_id
+from plugfit.app.utils.db.funcs import utcnow
+from ..utils.email.email import send_verification_email
 import httpx
 
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-
 REFRESH_COOKIE_NAME = "refresh_token"
 REFRESH_COOKIE_PATH = "/auth"
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+GOOGLE_SCOPES = "openid email profile"
+OAUTH_STATE_COOKIE = "oauth_state"
+OAUTH_STATE_MAX_AGE = 60 * 10
 
 
 def _make_slug(value: str) -> str:
@@ -45,20 +50,8 @@ def _make_slug(value: str) -> str:
     return candidate or secrets.token_hex(8)
 
 
-async def _get_user_by_email(db: AsyncSession, email: str) -> User | None:
-    result = await db.execute(select(User).where(User.email == email))
-    return result.scalar_one_or_none()
-
-
-async def _get_user_by_id(db: AsyncSession, user_id: str) -> User | None:
-    result = await db.execute(select(User).where(User.id == user_id))
-    return result.scalar_one_or_none()
-
-
-async def _authenticate_user(
-    db: AsyncSession, email: str, password: str
-) -> User | None:
-    user = await _get_user_by_email(db, email)
+async def authenticate_user(db: AsyncSession, email: str, password: str) -> User | None:
+    user = await get_user_by_email(db, email)
     if not user or not verify_password(password, user.password_hash):
         return None
     return user
@@ -89,7 +82,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
-    user = await _get_user_by_id(db, user_id)
+    user = await get_user_by_id(db, user_id)
     if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -138,7 +131,7 @@ async def _issue_token_pair(
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)) -> User:
-    existing = await _get_user_by_email(db, user_in.email)
+    existing = await get_user_by_email(db, user_in.email)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -184,7 +177,7 @@ async def verify_email(
             detail="Invalid token",
         )
 
-    user = await _get_user_by_email(db, email)
+    user = await get_user_by_email(db, email)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -206,7 +199,7 @@ async def resend_verification(
     payload: ResendVerificationRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
-    user = await _get_user_by_email(db, payload.email)
+    user = await get_user_by_email(db, payload.email)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -227,7 +220,7 @@ async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> Token:
-    user = await _authenticate_user(db, form_data.username, form_data.password)
+    user = await authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -278,7 +271,7 @@ async def refresh(
     if stored.expires_at <= utcnow():
         raise invalid
 
-    user = await _get_user_by_id(db, stored.user_id)
+    user = await get_user_by_id(db, stored.user_id)
     if not user or not user.is_active:
         raise invalid
 
@@ -309,14 +302,6 @@ async def logout(
             await db.commit()
 
     _clear_refresh_cookie(response)
-
-
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
-GOOGLE_SCOPES = "openid email profile"
-OAUTH_STATE_COOKIE = "oauth_state"
-OAUTH_STATE_MAX_AGE = 60 * 10
 
 
 @router.get("/google")
@@ -402,7 +387,7 @@ async def google_callback(
                 detail="Account is inactive",
             )
     else:
-        user = await _get_user_by_email(db, google_email)
+        user = await get_user_by_email(db, google_email)
 
         if user:
             if not user.is_active:
@@ -488,14 +473,14 @@ async def update_current_user(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    if not any([payload.name, payload.email, payload.password]):
+    if not any((payload.name, payload.email)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No update fields provided.",
         )
 
     if payload.email and payload.email != current_user.email:
-        existing = await _get_user_by_email(db, payload.email)
+        existing = await get_user_by_email(db, payload.email)
         if existing and existing.id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -504,17 +489,13 @@ async def update_current_user(
         current_user.email = payload.email
         current_user.is_email_verified = False
         _send_verification_email(payload.email)
-
-    if payload.name and payload.name != current_user.name:
+    if payload.name:
         slug = _make_slug(payload.name)
         result = await db.execute(select(User).where(User.slug == slug))
         if result.scalar_one_or_none():
             slug = f"{slug}-{secrets.token_hex(4)}"
         current_user.name = payload.name
         current_user.slug = slug
-
-    if payload.password:
-        current_user.password_hash = hash_password(payload.password)
 
     db.add(current_user)
     await db.commit()

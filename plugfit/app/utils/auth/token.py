@@ -3,8 +3,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
 from jose import JWTError, jwt, exceptions
-from ...app.utils.db import utcnow
-from jose import JWTError, jwt
+from ..db.funcs import utcnow
 import secrets
 import hashlib
 from plugfit.app.config import settings
@@ -94,6 +93,8 @@ def decode_verification_token(token: str) -> dict:
         return payload
     except exceptions.ExpiredSignatureError:
         raise TokenError("Token has expired")
+
+
 def create_refresh_token() -> str:
     return secrets.token_urlsafe(settings.REFRESH_TOKEN_SIZE)
 

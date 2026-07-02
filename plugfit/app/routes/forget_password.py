@@ -8,9 +8,9 @@ from ...app.db.db import get_db
 from ...app.models.models import User
 from ...app.models.password_reset import PasswordResetToken
 from ...app.schema.auth import ForgotPasswordRequest, ResetPasswordRequest
-from ...app.utils.token_reset import generate_reset_token, hash_token
-from ...app.utils.auth import hash_password
-from ...app.utils.email import send_password_reset_email
+from ..utils.auth.token_reset import generate_reset_token, hash_token
+from ..utils.auth.token import hash_password
+from ..utils.email.email import send_password_reset_email
 from ...app.config import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])

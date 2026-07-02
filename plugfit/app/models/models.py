@@ -17,7 +17,7 @@ from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from plugfit.app.db.db import Base
-from plugfit.app.utils.db import new_uuid, new_api_key, utcnow
+from plugfit.app.utils.db.funcs import new_uuid, new_api_key, utcnow
 
 
 class JobStatus(str, enum.Enum):

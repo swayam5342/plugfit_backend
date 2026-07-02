@@ -1,4 +1,3 @@
-# app/core/reset_tokens.py
 import hashlib
 import secrets
 
