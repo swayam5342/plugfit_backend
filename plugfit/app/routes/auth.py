@@ -1,9 +1,9 @@
 import re
 import secrets
 from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,8 +14,9 @@ from plugfit.app.schema.auth import (
     Token,
     UserCreate,
     UserOut,
+    UserUpdate,
 )
-from plugfit.app.models.models import RefreshToken, User
+from plugfit.app.models.models import RefreshToken, User, OAuthAccount
 from plugfit.app.utils.auth import (
     TokenError,
     create_access_token,
@@ -28,9 +29,8 @@ from plugfit.app.utils.auth import (
     decode_verification_token,
 )
 from plugfit.app.utils.db import utcnow
-
-from plugfit.app.utils.db import utcnow
 from ...app.utils.email import send_verification_email
+import httpx
 
 
 router = APIRouter()
@@ -311,6 +311,212 @@ async def logout(
     _clear_refresh_cookie(response)
 
 
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+GOOGLE_SCOPES = "openid email profile"
+OAUTH_STATE_COOKIE = "oauth_state"
+OAUTH_STATE_MAX_AGE = 60 * 10
+
+
+@router.get("/google")
+async def google_login() -> RedirectResponse:
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "access_type": "offline",
+        "prompt": "select_account",
+    }
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    redirect = RedirectResponse(url=f"{GOOGLE_AUTH_URL}?{query}")
+    state = secrets.token_urlsafe(32)
+    redirect.set_cookie(
+        key=OAUTH_STATE_COOKIE,
+        value=state,
+        httponly=True,
+        secure=settings.COOKIE_SECURE,
+        samesite="lax",
+        max_age=OAUTH_STATE_MAX_AGE,
+        path="/auth/google",
+    )
+    return redirect
+
+
+@router.get("/google/callback", response_model=Token)
+async def google_callback(
+    code: str,
+    state: str,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> Token:
+    stored_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not stored_state or stored_state != state:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid OAuth state — possible CSRF attempt",
+        )
+    response.delete_cookie(key=OAUTH_STATE_COOKIE, path="/auth/google")
+    google_tokens = await _exchange_code_for_tokens(code)
+    google_access_token = google_tokens.get("access_token")
+    if not google_access_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to obtain access token from Google",
+        )
+    google_user = await _fetch_google_userinfo(google_access_token)
+
+    google_sub = google_user.get("sub")
+    google_email = google_user.get("email")
+    google_name = google_user.get("name") or google_email.split("@")[0]  # type:ignore
+    email_verified = google_user.get("email_verified", False)
+
+    if not google_sub or not google_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google did not return required user info",
+        )
+
+    if not email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google account email is not verified",
+        )
+    result = await db.execute(
+        select(OAuthAccount).where(
+            OAuthAccount.provider == "google",
+            OAuthAccount.provider_user_id == google_sub,
+        )
+    )
+    oauth_row = result.scalar_one_or_none()
+
+    if oauth_row:
+        # already linked — just load the user
+        result = await db.execute(select(User).where(User.id == oauth_row.user_id))
+        user = result.scalar_one_or_none()
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account is inactive",
+            )
+    else:
+        user = await _get_user_by_email(db, google_email)
+
+        if user:
+            if not user.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Account is inactive",
+                )
+            if not user.is_email_verified:
+                user.is_email_verified = True
+        else:
+            slug = _make_slug(google_name)
+            slug_taken = await db.execute(select(User).where(User.slug == slug))
+            if slug_taken.scalar_one_or_none():
+                import secrets
+
+                slug = f"{slug}-{secrets.token_hex(4)}"
+
+            user = User(
+                name=google_name,
+                email=google_email,
+                slug=slug,
+                password_hash=None,
+                is_email_verified=True,
+            )
+            db.add(user)
+            await db.flush()
+            oauth_row = OAuthAccount(
+                user_id=user.id,
+                provider="google",
+                provider_user_id=google_sub,
+                provider_email=google_email,
+            )
+        db.add(oauth_row)
+    token, _ = await _issue_token_pair(db, user, response)
+    return token
+
+
+async def _exchange_code_for_tokens(code: str) -> dict:
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": settings.GOOGLE_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+            headers={"Accept": "application/json"},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Google token exchange failed: {resp.text}",
+        )
+    return resp.json()
+
+
+async def _fetch_google_userinfo(access_token: str) -> dict:
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to fetch user info from Google",
+        )
+    return resp.json()
+
+
 @router.get("/me", response_model=UserOut)
 async def read_current_user(current_user: User = Depends(get_current_user)) -> User:
+    return current_user
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_current_user(
+    payload: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if not any([payload.name, payload.email, payload.password]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No update fields provided.",
+        )
+
+    if payload.email and payload.email != current_user.email:
+        existing = await _get_user_by_email(db, payload.email)
+        if existing and existing.id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered",
+            )
+        current_user.email = payload.email
+        current_user.is_email_verified = False
+        _send_verification_email(payload.email)
+
+    if payload.name and payload.name != current_user.name:
+        slug = _make_slug(payload.name)
+        result = await db.execute(select(User).where(User.slug == slug))
+        if result.scalar_one_or_none():
+            slug = f"{slug}-{secrets.token_hex(4)}"
+        current_user.name = payload.name
+        current_user.slug = slug
+
+    if payload.password:
+        current_user.password_hash = hash_password(payload.password)
+
+    db.add(current_user)
+    await db.commit()
+    await db.refresh(current_user)
     return current_user
