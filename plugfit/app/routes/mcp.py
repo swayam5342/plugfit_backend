@@ -46,17 +46,32 @@ class HttpMcpSession:
         if id_ is None and method.startswith("notifications/"):
             return None
 
+        log.info(
+            f"MCP dispatch request: server={self.server.id} method={method} id={id_} "
+            f"tool_count={len(self._tools)}"
+        )
         try:
             if method == "initialize":
+                log.debug("MCP initialize requested")
                 return ok(id_, make_initialize_result(self._title))
             elif method == "tools/list":
+                log.debug("MCP tools list requested")
                 schemas = [make_tool_schema(t) for t in self._tools.values()]
                 return ok(id_, {"tools": schemas})
             elif method == "tools/call":
+                tool_name = params.get("name")
+                log.info(
+                    f"MCP tool call request: server={self.server.id} tool={tool_name}"
+                )
+                log.info(
+                    f"MCP tool selected: server={self.server.id} selected_tool={tool_name} tool_defined={tool_name in self._tools}"
+                )
                 return self._tools_call(id_, params)
             elif method == "ping":
+                log.debug("MCP ping requested")
                 return ok(id_, {})
             else:
+                log.warning(f"MCP method not found: {method}")
                 return err(id_, METHOD_NOT_FOUND, f"Method not found: {method}")
         except Exception as exc:
             log.exception("MCP dispatch error")
@@ -67,15 +82,31 @@ class HttpMcpSession:
         args = params.get("arguments") or {}
 
         if name not in self._tools:
+            log.warning(
+                f"MCP tool not found: server={self.server.id} tool={name}"
+            )
             return err(id_, TOOL_NOT_FOUND, f"Tool not found: '{name}'")
 
         tool = self._tools[name]
+        allowed_params = set(tool.get("parameters", {}).keys())
+        invalid_args = [k for k in args if k not in allowed_params]
+        if invalid_args:
+            log.warning(
+                f"MCP tool call invalid params: server={self.server.id} tool={name} invalid={invalid_args}"
+            )
+            return err(
+                id_, INVALID_PARAMS, f"Invalid params for '{name}': {invalid_args}"
+            )
+
         missing = [
             k
             for k, p in tool.get("parameters", {}).items()
             if p.get("required") and k not in args
         ]
         if missing:
+            log.warning(
+                f"MCP tool call missing required params: server={self.server.id} tool={name} missing={missing}"
+            )
             return err(
                 id_, INVALID_PARAMS, f"Missing required params for '{name}': {missing}"
             )
@@ -83,8 +114,14 @@ class HttpMcpSession:
             base_url = self.server.base_url or ""
             headers = self.server.upstream_headers or {}
             if base_url or get_tool_handler(name):
+                log.debug(
+                    f"Calling tool: server={self.server.id} tool={name} base_url_set={bool(base_url)}"
+                )
                 result_text = call_tool(tool, args, base_url, headers)
             else:
+                log.warning(
+                    f"No base_url or registered handler for MCP tool: server={self.server.id} tool={name}"
+                )
                 result_text = json.dumps(
                     {
                         "note": "No base_url set for this server — configure it in settings or register a handler",
@@ -93,9 +130,15 @@ class HttpMcpSession:
                     }
                 )
 
+            log.info(
+                f"MCP tool call succeeded: server={self.server.id} tool={name}"
+            )
             return ok(id_, make_tool_result(result_text))
 
         except ProxyError as exc:
+            log.error(
+                f"MCP proxy error: server={self.server.id} tool={name} error={str(exc)}"
+            )
             return ok(id_, make_tool_result(str(exc), is_error=True))
 
 
@@ -147,9 +190,14 @@ async def mcp_post(
     response = session.dispatch(body)
     if response is None:
         # Notification — 202 No Content
-        log.debug(f"MCP notification processed")
+        log.info(
+            f"MCP notification processed: tenant_id={tenant_id} server_id={server_id}"
+        )
         return Response(status_code=202)
 
+    log.debug(
+        f"MCP response ready: tenant_id={tenant_id} server_id={server_id} response_id={body.get('id')}"
+    )
     return JSONResponse(response)
 
 
