@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from .celery import celery_app
 from plugfit.app.db.db_sync import sync_db_session
-from .cleaner import clean_manifest
+from .cleaner import clean_manifest, heal_manifest
 from .scorer import heuristic_score, gemini_score
 from plugfit.app.models.models import Job, JobStatus, Server, ServerStatus
 from plugfit.app.config import settings
@@ -108,18 +108,35 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
         _append_log(job_id, "evaluating", "Scoring cleaned manifest with Gemini")
         score_after, feedback = gemini_score(cleaned_manifest)
 
-        # Attach per-tool feedback to the manifest for the dashboard
-        if feedback:
-            cleaned_manifest["_score_feedback"] = feedback
+        _append_log(
+            job_id,
+            "healing",
+            "Running self-healing pass for low-quality tool descriptions",
+        )
+        healed_manifest, healed_score, healed_feedback = heal_manifest(
+            cleaned_manifest,
+            feedback=feedback,
+            initial_score=score_after,
+            max_attempts=3,
+        )
 
         _append_log(
             job_id,
             "evaluating",
-            f"After score: {score_after}/100  (Δ {score_after - score_before:+.1f})",
+            f"After score: {healed_score}/100  (Δ {healed_score - score_before:+.1f})",
         )
+        if healed_manifest.get("_healing_meta", {}).get("improved"):
+            _append_log(
+                job_id,
+                "healing",
+                f"Self-healing improved the manifest by {healed_score - score_after:+.1f} points",
+            )
+        else:
+            _append_log(job_id, "healing", "Self-healing did not materially improve the manifest")
+
         bad = [
             f["name"]
-            for f in feedback
+            for f in healed_feedback
             if (f.get("clarity", 10) < 5 or f.get("selectability", 10) < 5)
         ]
         if bad:
@@ -130,9 +147,9 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
                 select(Server).where(Server.id == server_id)
             ).scalar_one_or_none()
             if server:
-                server.cleaned_manifest = cleaned_manifest
+                server.cleaned_manifest = healed_manifest
                 server.score_before = score_before
-                server.score_after = score_after
+                server.score_after = healed_score
                 server.tool_count_after = tool_count_after
                 server.status = ServerStatus.READY
 
@@ -140,14 +157,14 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
         _append_log(
             job_id,
             "done",
-            f"Pipeline complete ✓  Score: {score_before} → {score_after}",
+            f"Pipeline complete ✓  Score: {score_before} → {healed_score}",
         )
 
         log.info(
             "Pipeline done: server=%s score=%s→%s tools=%d→%d",
             server_id[:8],
             score_before,
-            score_after,
+            healed_score,
             tool_count_before,
             tool_count_after,
         )
@@ -155,7 +172,7 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
         return {
             "server_id": server_id,
             "score_before": score_before,
-            "score_after": score_after,
+            "score_after": healed_score,
             "tool_count_before": tool_count_before,
             "tool_count_after": tool_count_after,
         }

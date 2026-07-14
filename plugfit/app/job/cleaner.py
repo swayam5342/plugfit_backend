@@ -1,9 +1,12 @@
+import copy
 import json
 import logging
 import re
-import copy
-from plugfit.app.config import settings
+from typing import Any
+
 from google.genai.types import GenerateContentResponse
+
+from plugfit.app.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -225,6 +228,166 @@ Tools to analyse:
     except Exception as e:
         log.warning("Duplicate detection failed: %s — skipping dedup", e)
         return []
+
+
+_HEAL_SYSTEM = """You are repairing MCP tool descriptions for an AI agent.
+
+Improve the descriptions for the listed tools only.
+Rules:
+- Keep tool names, parameters, methods, and paths unchanged.
+- Make each description more specific, action-oriented, and easier to choose correctly.
+- Explain when to use the tool versus similar tools.
+- Return ONLY a JSON object of the form {"replacements": [{"name": "tool_name", "description": "..."}]}
+- No markdown, no code fences, no explanation."""
+
+
+def _repair_descriptions(
+    manifest: dict, tool_names: list[str], feedback: list[dict] | None = None
+) -> dict[str, str]:
+    tools = [
+        tool for tool in manifest.get("tools", []) if tool.get("name") in tool_names
+    ]
+    if not tools:
+        return {}
+
+    feedback_map = {
+        str(item.get("name")): str(item.get("issue", "")).strip()
+        for item in feedback or []
+        if isinstance(item, dict) and item.get("name")
+    }
+
+    tool_summaries = []
+    for tool in tools:
+        tool_summaries.append(
+            {
+                "name": tool.get("name"),
+                "current_description": tool.get("description", ""),
+                "http_method": tool.get("http_method", ""),
+                "http_path": tool.get("http_path", ""),
+                "parameters": list(tool.get("parameters", {}).keys()),
+                "feedback": feedback_map.get(tool.get("name", ""), ""),
+            }
+        )
+
+    prompt = f"""{_HEAL_SYSTEM}
+
+Tools to repair:
+{json.dumps(tool_summaries, indent=2)}"""
+
+    try:
+        raw = _call_gemini(prompt, expect_json=True)
+        data = json.loads(raw)
+        replacements = data.get("replacements", [])
+        return {
+            r["name"]: r["description"]
+            for r in replacements
+            if isinstance(r, dict) and "name" in r and "description" in r
+        }
+    except Exception as exc:
+        log.warning("Description repair failed: %s — leaving manifest unchanged", exc)
+        return {}
+
+
+def heal_manifest(
+    manifest: dict,
+    feedback: list[dict] | None = None,
+    initial_score: float | None = None,
+    max_attempts: int = 3,
+) -> tuple[dict, float, list[dict]]:
+    """
+    Iteratively improve low-quality tool descriptions using Gemini feedback.
+    Stops early when the score no longer improves materially.
+    Returns (manifest, final_score, feedback).
+    """
+    current = copy.deepcopy(manifest)
+    tools = current.get("tools", [])
+    if not tools:
+        return current, float(initial_score or 0.0), list(feedback or [])
+
+    from .scorer import gemini_score
+
+    if initial_score is None:
+        initial_score, initial_feedback = gemini_score(current)
+    else:
+        initial_feedback = feedback or []
+
+    best_manifest = copy.deepcopy(current)
+    best_score = float(initial_score if initial_score is not None else 0.0)
+    best_feedback = list(initial_feedback or [])
+    history: list[dict[str, Any]] = []
+
+    target_names = [
+        str(item.get("name"))
+        for item in (feedback or [])
+        if isinstance(item, dict)
+        and item.get("name")
+        and (
+            (item.get("clarity", 10) < 7)
+            or (item.get("selectability", 10) < 7)
+            or (item.get("param_clarity", 10) < 7)
+            or str(item.get("issue", "")).strip().lower() not in {"", "none"}
+        )
+    ]
+    if not target_names:
+        target_names = [tool.get("name", "") for tool in tools if tool.get("name")]
+
+    for attempt in range(1, max(1, max_attempts) + 1):
+        if not target_names:
+            break
+
+        replacements = _repair_descriptions(current, target_names, feedback)
+        if not replacements:
+            break
+
+        for tool in current.get("tools", []):
+            if tool.get("name") in replacements:
+                tool["description"] = replacements[tool.get("name")]
+
+        healed_score, healed_feedback = gemini_score(current)
+        improvement = healed_score - best_score
+        history.append(
+            {
+                "attempt": attempt,
+                "score": round(healed_score, 1),
+                "improvement": round(improvement, 1),
+                "targeted_tools": target_names,
+            }
+        )
+
+        if improvement >= 2.0:
+            best_manifest = copy.deepcopy(current)
+            best_score = healed_score
+            best_feedback = healed_feedback
+            target_names = [
+                str(item.get("name"))
+                for item in healed_feedback
+                if isinstance(item, dict)
+                and item.get("name")
+                and (
+                    (item.get("clarity", 10) < 7)
+                    or (item.get("selectability", 10) < 7)
+                    or (item.get("param_clarity", 10) < 7)
+                    or str(item.get("issue", "")).strip().lower() not in {"", "none"}
+                )
+            ]
+            if healed_score >= 90:
+                break
+            continue
+
+        break
+
+    best_manifest["_healing_meta"] = {
+        "attempts": len(history),
+        "initial_score": round(
+            float(initial_score if initial_score is not None else best_score), 1
+        ),
+        "final_score": round(float(best_score), 1),
+        "improved": best_score > float(initial_score if initial_score is not None else best_score),
+        "history": history,
+    }
+    if best_feedback:
+        best_manifest["_score_feedback"] = best_feedback
+    return best_manifest, round(float(best_score), 1), list(best_feedback)
 
 
 def clean_manifest(raw_manifest: dict) -> dict:
