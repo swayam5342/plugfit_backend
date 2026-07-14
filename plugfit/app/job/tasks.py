@@ -120,9 +120,6 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
             max_attempts=3,
         )
 
-        if healed_feedback:
-            healed_manifest["_score_feedback"] = healed_feedback
-
         _append_log(
             job_id,
             "evaluating",
