@@ -1,13 +1,10 @@
 import json
 import logging
-import os
 import re
 from plugfit.app.config import settings
 
 log = logging.getLogger("plugfit.scorer")
 
-
-# ── Heuristic scorer (no LLM) ─────────────────────────────────────────────────
 
 _ACTION_VERBS = {
     "returns",
@@ -152,9 +149,6 @@ Here are the tools to score:
         feedback = json.loads(raw)
         if not isinstance(feedback, list):
             raise ValueError("Expected JSON array")
-
-        # Aggregate: average across (clarity + selectability + param_clarity) / 3
-        # then scale to 0-100
         scores = []
         for item in feedback:
             avg = (
@@ -167,7 +161,7 @@ Here are the tools to score:
         if not scores:
             return heuristic_score(manifest), feedback
 
-        overall = round((sum(scores) / len(scores)) * 10, 1)  # 0-10 → 0-100
+        overall = round((sum(scores) / len(scores)) * 10, 1)
         log.info("Gemini score: %.1f/100 across %d tools", overall, len(scores))
         return overall, feedback
 

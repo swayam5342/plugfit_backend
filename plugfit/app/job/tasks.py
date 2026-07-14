@@ -104,26 +104,50 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
             f"Cleaning done: {tool_count_before} → {tool_count_after} tools",
         )
 
-        # ── Stage 4: Score after ──────────────────────────────────────────────
-        _append_log(job_id, "evaluating", "Scoring cleaned manifest with Gemini")
-        score_after, feedback = gemini_score(cleaned_manifest)
+        # ── Stage 4: MCP eval (before/after tool-call accuracy) ──────────────
+        _append_log(job_id, "evaluating", "Running MCP eval (tool-call accuracy)")
+        feedback: list[dict] = []
+        eval_ran = False
 
-        # Attach per-tool feedback to the manifest for the dashboard
-        if feedback:
-            cleaned_manifest["_score_feedback"] = feedback
+        if settings.GEMINI_API_KEY:
+            try:
+                from plugfit.app.eval.pipeline import run_eval_pipeline
+                comparison = run_eval_pipeline(
+                    raw_manifest=raw_manifest,
+                    cleaned_manifest=cleaned_manifest,
+                    gemini_api_key=settings.GEMINI_API_KEY,
+                    model="gemini-2.0-flash",
+                    runs_per_task=1,
+                )
+                score_before = comparison.before.score
+                score_after = comparison.after.score
+                eval_ran = True
+                _append_log(
+                    job_id,
+                    "evaluating",
+                    f"Eval complete: {score_before:.1f} → {score_after:.1f}"
+                    f"  (Δ {comparison.delta:+.1f})",
+                )
+            except Exception as exc:
+                log.warning("Eval pipeline failed: %s — falling back to Gemini score", exc)
 
-        _append_log(
-            job_id,
-            "evaluating",
-            f"After score: {score_after}/100  (Δ {score_after - score_before:+.1f})",
-        )
-        bad = [
-            f["name"]
-            for f in feedback
-            if (f.get("clarity", 10) < 5 or f.get("selectability", 10) < 5)
-        ]
-        if bad:
-            _append_log(job_id, "evaluating", f"Tools still needing attention: {bad}")
+        if not eval_ran:
+            _append_log(job_id, "evaluating", "Scoring cleaned manifest with Gemini (eval pipeline unavailable)")
+            score_after, feedback = gemini_score(cleaned_manifest)
+            if feedback:
+                cleaned_manifest["_score_feedback"] = feedback
+            _append_log(
+                job_id,
+                "evaluating",
+                f"After score: {score_after}/100  (Δ {score_after - score_before:+.1f})",
+            )
+            bad = [
+                f["name"]
+                for f in feedback
+                if (f.get("clarity", 10) < 5 or f.get("selectability", 10) < 5)
+            ]
+            if bad:
+                _append_log(job_id, "evaluating", f"Tools still needing attention: {bad}")
         _append_log(job_id, "saving", "Persisting results to database")
         with sync_db_session() as db:
             server = db.execute(

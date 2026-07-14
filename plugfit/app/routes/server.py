@@ -86,6 +86,7 @@ async def create_server(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ServerOut:
+    logger.error(spec_url, name, base_url, upstream_headers, tenant)
     logger.info(f"Server creation request: name='{name}', user_id={tenant.id}")
     if (spec_file is None) == (spec_url is None):
         logger.warning(

@@ -276,8 +276,6 @@ def clean_manifest(raw_manifest: dict) -> dict:
                 )
                 merged.append(d["drop"])
             tools = [t for t in tools if t["name"] not in drop_names]
-
-    # ── Assemble cleaned manifest ─────────────────────────────────────────────
     manifest["tools"] = tools
     manifest["tool_count"] = len(tools)
     manifest["title"] = (manifest.get("title") or "").replace(

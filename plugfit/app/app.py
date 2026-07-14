@@ -7,6 +7,7 @@ from .routes.auth import router as authrouter
 from .routes.server import router as serverrouter
 from .routes.mcp import router as mcprouter
 from plugfit.app.logging import setup_logging
+from starlette.requests import Request
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_request(request: Request, call_next):
+    print(request.method)
+    print(request.headers.get("content-type"))
+    response = await call_next(request)
+    return response
 
 
 app.include_router(authrouter, prefix="/auth")

@@ -147,7 +147,7 @@ async def mcp_post(
     response = session.dispatch(body)
     if response is None:
         # Notification — 202 No Content
-        log.debug(f"MCP notification processed")
+        log.debug("MCP notification processed")
         return Response(status_code=202)
 
     return JSONResponse(response)

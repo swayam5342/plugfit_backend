@@ -1,11 +1,11 @@
-import os
 from contextlib import contextmanager
 from typing import Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from plugfit.app.config import settings
 
-_raw_url = os.getenv("DATABASE_URL", "sqlite:///./plugfit_dev.db")
+_raw_url = settings.DATABASE_URL
 _sync_url = _raw_url.replace("sqlite+aiosqlite", "sqlite").replace(
     "postgresql+asyncpg", "postgresql+psycopg2"
 )
