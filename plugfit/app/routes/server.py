@@ -7,6 +7,7 @@ GET  /servers/{id}           — get one server (status + scores)
 GET  /servers/{id}/diff      — before/after tool manifest diff
 GET  /servers/{id}/jobs      — job history for a server
 POST /servers/{id}/reprocess — re-run the pipeline (after spec update)
+POST /servers/{id}/eval      — re-run just the MCP eval (rate-limited)
 DELETE /servers/{id}         — delete a server
 """
 
@@ -30,7 +31,7 @@ from plugfit.app.models.models import (
     User,
 )
 from plugfit.app.db.db import get_db
-from plugfit.app.job.tasks import run_pipeline
+from plugfit.app.job.tasks import run_eval_only, run_pipeline
 from plugfit.app.schema.server import (
     JobOut,
     ManifestDiff,
@@ -38,6 +39,10 @@ from plugfit.app.schema.server import (
     ServerOut,
     ToolDiff,
 )
+from plugfit.app.utils.rate_limit import rate_limit
+
+EVAL_RATE_LIMIT = 3  # evals
+EVAL_RATE_WINDOW = 60 * 60  # per hour, per user per server
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +91,6 @@ async def create_server(
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ServerOut:
-    logger.error(spec_url, name, base_url, upstream_headers, tenant)
     logger.info(f"Server creation request: name='{name}', user_id={tenant.id}")
     if (spec_file is None) == (spec_url is None):
         logger.warning(
@@ -283,7 +287,8 @@ async def get_diff(
         t["name"]: t for t in server.cleaned_manifest.get("tools", [])
     }
 
-    removed: list[str] = [n for n in before_tools if n not in after_tools]
+    removed = server.cleaned_manifest.get("_cleaning_meta", {}).get("dropped", [])
+
     merged: list[str] = [
         n for n in before_tools if n not in after_tools and n not in removed
     ]
@@ -359,6 +364,50 @@ async def reprocess(
     await db.refresh(job)
     run_pipeline.delay(server.id, job.id)  # type:ignore
     logger.info(f"Reprocess initiated - server: {server_id}, job_id: {job.id}")
+    return JobOut.model_validate(job)
+
+
+@router.post(
+    "/{server_id}/eval",
+    response_model=JobOut,
+    summary="Re-run just the MCP eval (before/after tool-call accuracy)",
+    dependencies=[
+        Depends(
+            rate_limit(
+                lambda request,
+                tenant: f"eval:{tenant.id}:{request.path_params['server_id']}",
+                limit=EVAL_RATE_LIMIT,
+                window_seconds=EVAL_RATE_WINDOW,
+            )
+        )
+    ],
+)
+async def trigger_eval(
+    server_id: str,
+    tenant: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    logger.info(f"Eval request for server: {server_id}, user_id: {tenant.id}")
+    server = await _get_server_for_tenant(server_id, tenant, db)
+
+    if server.status == ServerStatus.PROCESSING:
+        logger.warning(f"Eval failed - pipeline already running: {server_id}")
+        raise HTTPException(409, detail="Pipeline already running for this server")
+
+    if not server.raw_manifest or not server.cleaned_manifest:
+        raise HTTPException(
+            409,
+            detail="Server has no cleaned manifest yet — run the full pipeline first",
+        )
+
+    server.status = ServerStatus.PROCESSING
+    job = Job(server_id=server.id, status=JobStatus.PENDING, stage="pending")
+    db.add(job)
+    await db.flush()
+    await db.commit()
+    await db.refresh(job)
+    run_eval_only.delay(server.id, job.id)  # type:ignore
+    logger.info(f"Eval initiated - server: {server_id}, job_id: {job.id}")
     return JobOut.model_validate(job)
 
 

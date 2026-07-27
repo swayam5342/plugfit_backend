@@ -66,7 +66,9 @@ class Settings(BaseSettings):
 
     PIPELINE_WORKERS: int = Field(default=1)
 
-    MCP_BASE_PATH: str = Field(default="/mcp")
+    MCP_BASE_PATH: str = Field(default="mcp")
+
+    AI_MODEL_NAME: str = Field(default="gemini-flash-latest")
 
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "*"]

@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 import re
 
+from plugfit.app.config import settings
+
 from .types import (
     DIFFICULTY_WEIGHTS, OUTCOME_WEIGHTS, TRAP_BONUS,
     Difficulty, EvalReport, Outcome, Task, TaskResult, TestSuite, ToolCall,
@@ -146,7 +148,7 @@ def build_report(
     suite: TestSuite,
     manifest_title: str,
     is_before: bool,
-    model_used: str = "gemini-2.5-flash",
+    model_used: str = settings.AI_MODEL_NAME,
 ) -> EvalReport:
     """Aggregate TaskResults into a full EvalReport."""
     score = compute_score(results, suite)

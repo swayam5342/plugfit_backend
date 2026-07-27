@@ -46,8 +46,13 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_request(request: Request, call_next):
-    print(request.method)
-    print(request.headers.get("content-type"))
+    # for frontend debug to be removed
+    logger.debug(
+        "%s %s content-type=%s",
+        request.method,
+        request.url.path,
+        request.headers.get("content-type"),
+    )
     response = await call_next(request)
     return response
 

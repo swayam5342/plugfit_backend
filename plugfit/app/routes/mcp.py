@@ -181,7 +181,7 @@ async def mcp_info(
                     "command": "npx",
                     "args": [
                         "mcp-remote",
-                        f"{settings.HOST}:{settings.PORT}/{settings.MCP_BASE_PATH}/{tenant_id}/{server_id}",
+                        f"{settings.HOST}/{settings.MCP_BASE_PATH}/{tenant_id}/{server_id}",
                     ],
                 }
             }

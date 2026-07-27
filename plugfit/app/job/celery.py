@@ -21,6 +21,7 @@ celery_app.conf.update(
     task_default_queue="pipeline",
     task_routes={
         "plugfit.app.job.tasks.run_pipeline": {"queue": "pipeline"},
+        "plugfit.app.job.tasks.run_eval_only": {"queue": "pipeline"},
     },
     task_max_retries=settings.PIPELINE_MAX_RETRY,
     task_default_retry_delay=settings.PIPELINE_TIMEOUT_SECONDS,

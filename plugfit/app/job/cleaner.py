@@ -24,7 +24,7 @@ def _call_gemini(prompt: str, expect_json: bool = True) -> str:
     """Single Gemini call. Returns the text content of the response."""
     client = _get_client()
     response: GenerateContentResponse = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=settings.AI_MODEL_NAME,
         contents=prompt,
         config={
             "temperature": 0.2,

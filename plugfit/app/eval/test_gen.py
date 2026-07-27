@@ -23,6 +23,8 @@ import os
 import re
 import uuid
 
+from plugfit.app.config import settings
+
 from .types import Difficulty, Task, TestSuite
 
 log = logging.getLogger("plugfit.eval.test_gen")
@@ -37,7 +39,7 @@ def _gemini(prompt: str, api_key: str | None = None) -> str:
         raise RuntimeError("GEMINI_API_KEY not set")
     client = genai.Client(api_key=key)
     resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=settings.AI_MODEL_NAME,
         contents=prompt,
         config={"temperature": 0.4, "max_output_tokens": 8192},
     )

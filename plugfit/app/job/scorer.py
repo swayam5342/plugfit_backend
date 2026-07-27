@@ -138,7 +138,7 @@ Here are the tools to score:
 
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=settings.AI_MODEL_NAME,
             contents=prompt,
             config={"temperature": 0.1, "max_output_tokens": 4096},
         )

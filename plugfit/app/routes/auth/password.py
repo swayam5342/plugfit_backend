@@ -55,7 +55,7 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)) -> U
         slug=slug,
         password_hash=hash_password(user_in.password),
     )
-    send_verification_email_for(user_in.email)
+    send_verification_email_for(user_name=user_in.name, email=user_in.email)
     db.add(user)
     await db.commit()
     await db.refresh(user)

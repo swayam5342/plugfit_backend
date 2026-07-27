@@ -39,7 +39,7 @@ async def forgot_password(
         db.add(reset_entry)
         await db.commit()
         send_password_reset_email(
-            username=user.email, email=user.email, reset_link=raw_token
+            username=user.name, email=user.email, reset_link=raw_token
         )
         logger.info(f"Password reset email sent for user: {payload.email}")
     else:

@@ -25,6 +25,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from plugfit.app.config import settings
+
 from .mock_server import MockMCPServer
 from .runner import run_task
 from .scorer import build_report, classify_outcome
@@ -36,7 +38,7 @@ from .types import (
 log = logging.getLogger("plugfit.eval.harness")
 
 N_RUNS = 2          # runs per task (majority vote; 2 = take better of 2)
-MODEL  = "gemini-2.5-flash"
+MODEL  = settings.AI_MODEL_NAME
 
 
 # ── Result container ──────────────────────────────────────────────────────────

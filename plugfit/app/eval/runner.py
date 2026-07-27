@@ -22,11 +22,13 @@ import logging
 import os
 from typing import Any
 
+from plugfit.app.config import settings
+
 from .types import Difficulty, Outcome, TaskResult, ToolCall
 
 log = logging.getLogger("plugfit.eval.runner")
 
-MODEL = "gemini-2.5-flash"
+MODEL = settings.AI_MODEL_NAME
 MAX_TURNS = 6   # max agentic turns before we stop (prevents infinite loops)
 
 
@@ -175,7 +177,7 @@ class EvalRunner:
         self,
         manifest: dict,
         mcp_client,
-        model: str = "gemini-2.5-flash",
+        model: str = settings.AI_MODEL_NAME,
         gemini_api_key: str | None = None,
     ):
         self._manifest  = manifest

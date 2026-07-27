@@ -2,11 +2,13 @@ import logging
 import os
 from dataclasses import dataclass, field
 
+from plugfit.app.config import settings
+
 log = logging.getLogger("plugfit.eval.agent")
 
-MAX_TURNS = 6  # max back-and-forth before we declare no_call
-MAX_TOKENS = 1024  # keep costs low — we just need tool selection + brief answer
-DEFAULT_MODEL = "gemini-2.5-flash"
+MAX_TURNS = 6
+MAX_TOKENS = 1024
+DEFAULT_MODEL = settings.AI_MODEL_NAME
 
 
 @dataclass
@@ -89,9 +91,7 @@ def run_agent(
         max_output_tokens=MAX_TOKENS,
     )
 
-    contents: list = [
-        types.Content(role="user", parts=[types.Part(text=instruction)])
-    ]
+    contents: list = [types.Content(role="user", parts=[types.Part(text=instruction)])]
     run = AgentRun(task_instruction=instruction)
 
     for turn in range(MAX_TURNS):

@@ -20,13 +20,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def send_verification_email_for(email: str) -> None:
+def send_verification_email_for(user_name, email: str) -> None:
     token = create_verification_token(
         email=email,
         expires_delta=timedelta(minutes=settings.VERIFICATION_TOKEN_EXPIRE_MINUTES),
     )
-    magic_link = f"{settings.FRONTEND_URL}/auth/verify-email?token={token}"
-    send_verification_email(email, magic_link)
+    magic_link = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+    send_verification_email(user_name, email, magic_link)
 
 
 @router.get("/verify-email")
@@ -91,6 +91,6 @@ async def resend_verification(
         )
         return {"detail": "Email is already verified."}
 
-    send_verification_email_for(user.email)
+    send_verification_email_for(user_name=user.name, email=user.email)
     logger.info(f"Verification email resent: {payload.email}")
     return {"detail": "Verification email sent."}

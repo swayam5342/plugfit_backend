@@ -112,11 +112,12 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
         if settings.GEMINI_API_KEY:
             try:
                 from plugfit.app.eval.pipeline import run_eval_pipeline
+
                 comparison = run_eval_pipeline(
                     raw_manifest=raw_manifest,
                     cleaned_manifest=cleaned_manifest,
                     gemini_api_key=settings.GEMINI_API_KEY,
-                    model="gemini-2.0-flash",
+                    model=settings.AI_MODEL_NAME,
                     runs_per_task=1,
                 )
                 score_before = comparison.before.score
@@ -129,10 +130,16 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
                     f"  (Δ {comparison.delta:+.1f})",
                 )
             except Exception as exc:
-                log.warning("Eval pipeline failed: %s — falling back to Gemini score", exc)
+                log.warning(
+                    "Eval pipeline failed: %s — falling back to Gemini score", exc
+                )
 
         if not eval_ran:
-            _append_log(job_id, "evaluating", "Scoring cleaned manifest with Gemini (eval pipeline unavailable)")
+            _append_log(
+                job_id,
+                "evaluating",
+                "Scoring cleaned manifest with Gemini (eval pipeline unavailable)",
+            )
             score_after, feedback = gemini_score(cleaned_manifest)
             if feedback:
                 cleaned_manifest["_score_feedback"] = feedback
@@ -147,7 +154,9 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
                 if (f.get("clarity", 10) < 5 or f.get("selectability", 10) < 5)
             ]
             if bad:
-                _append_log(job_id, "evaluating", f"Tools still needing attention: {bad}")
+                _append_log(
+                    job_id, "evaluating", f"Tools still needing attention: {bad}"
+                )
         _append_log(job_id, "saving", "Persisting results to database")
         with sync_db_session() as db:
             server = db.execute(
@@ -191,6 +200,101 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
         _set_job(job_id, JobStatus.FAILED, error=err_msg)
         _set_server_status(server_id, ServerStatus.ERROR)
         _append_log(job_id, "failed", f"Pipeline failed: {err_msg}")
+        transient = any(
+            k in err_msg.lower()
+            for k in ("rate limit", "quota", "timeout", "connection", "503", "429")
+        )
+        if transient:
+            raise self.retry(exc=exc)
+        raise
+
+
+@celery_app.task(
+    name="plugfit.platform.jobs.tasks.run_eval_only",
+    bind=True,
+    max_retries=settings.PIPELINE_MAX_RETRY,
+    default_retry_delay=settings.PIPELINE_TIMEOUT_SECONDS,
+    acks_late=True,
+)
+def run_eval_only(self, server_id: str, job_id: str) -> dict:
+    """Re-run just the MCP eval (before/after tool-call accuracy) using the
+    manifests already stored on the server — no re-cleaning."""
+    log.info("Eval-only started: server=%s job=%s", server_id[:8], job_id[:8])
+    _set_job(job_id, JobStatus.RUNNING)
+
+    try:
+        _append_log(job_id, "loading", "Loading server manifests from database")
+        with sync_db_session() as db:
+            server = db.execute(
+                select(Server).where(Server.id == server_id)
+            ).scalar_one_or_none()
+            if not server:
+                raise RuntimeError(f"Server {server_id} not found in database")
+
+            raw_manifest = server.raw_manifest
+            cleaned_manifest = server.cleaned_manifest
+
+        if not raw_manifest or not cleaned_manifest:
+            raise RuntimeError(
+                "Server has no raw_manifest/cleaned_manifest — run the full "
+                "pipeline first"
+            )
+
+        _append_log(job_id, "evaluating", "Running MCP eval (tool-call accuracy)")
+        from plugfit.app.eval.pipeline import run_eval_pipeline
+
+        comparison = run_eval_pipeline(
+            raw_manifest=raw_manifest,
+            cleaned_manifest=cleaned_manifest,
+            gemini_api_key=settings.GEMINI_API_KEY,
+            model=settings.AI_MODEL_NAME,
+            runs_per_task=1,
+        )
+        score_before = comparison.before.score
+        score_after = comparison.after.score
+        _append_log(
+            job_id,
+            "evaluating",
+            f"Eval complete: {score_before:.1f} → {score_after:.1f}"
+            f"  (Δ {comparison.delta:+.1f})",
+        )
+
+        _append_log(job_id, "saving", "Persisting results to database")
+        with sync_db_session() as db:
+            server = db.execute(
+                select(Server).where(Server.id == server_id)
+            ).scalar_one_or_none()
+            if server:
+                server.score_before = score_before
+                server.score_after = score_after
+                server.status = ServerStatus.READY
+
+        _set_job(job_id, JobStatus.DONE)
+        _append_log(
+            job_id, "done", f"Eval complete ✓  Score: {score_before} → {score_after}"
+        )
+
+        log.info(
+            "Eval-only done: server=%s score=%s→%s",
+            server_id[:8],
+            score_before,
+            score_after,
+        )
+
+        return {
+            "server_id": server_id,
+            "score_before": score_before,
+            "score_after": score_after,
+            "delta": comparison.delta,
+        }
+
+    except Exception as exc:
+        log.exception("Eval-only failed: server=%s job=%s", server_id[:8], job_id[:8])
+        err_msg = str(exc)
+
+        _set_job(job_id, JobStatus.FAILED, error=err_msg)
+        _set_server_status(server_id, ServerStatus.ERROR)
+        _append_log(job_id, "failed", f"Eval failed: {err_msg}")
         transient = any(
             k in err_msg.lower()
             for k in ("rate limit", "quota", "timeout", "connection", "503", "429")

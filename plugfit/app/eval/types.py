@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from plugfit.app.config import settings
+
 
 class Difficulty(str, enum.Enum):
     EASY   = "easy"    # single obvious tool, no ambiguity
@@ -158,7 +160,7 @@ class EvalReport:
     trap_correct:   int = 0
     trap_total:     int = 0
 
-    model_used:     str = "gemini-2.5-flash"
+    model_used:     str = settings.AI_MODEL_NAME
     evaluated_at:   str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

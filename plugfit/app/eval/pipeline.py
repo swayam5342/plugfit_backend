@@ -16,6 +16,8 @@ This is called from:
 import logging
 from dataclasses import dataclass
 
+from plugfit.app.config import settings
+
 from .mcp_client import InlineMCPClient
 from .runner import EvalRunner
 from .test_gen import generate_test_suite
@@ -65,7 +67,7 @@ def run_eval_pipeline(
     raw_manifest: dict,
     cleaned_manifest: dict,
     gemini_api_key: str | None = None,
-    model: str = "gemini-2.5-flash",
+    model: str = settings.AI_MODEL_NAME,
     runs_per_task: int = 3,
     min_tasks: int = 8,
     trap_count: int = 3,
