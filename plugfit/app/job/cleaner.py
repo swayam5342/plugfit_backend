@@ -3,6 +3,7 @@ import logging
 import re
 import copy
 from plugfit.app.config import settings
+from plugfit.ingest.models import stable_tool_id
 from google.genai.types import GenerateContentResponse
 
 log = logging.getLogger(__name__)
@@ -111,11 +112,20 @@ def _normalise_name(name: str, http_path: str = "") -> str:
 
 
 def _is_dead(tool: dict) -> bool:
+    """
+    A tool is only dropped when ALL weak signals coincide: an HTTP-style
+    tool at the root/blank path with no description AND no params (typical
+    index/health junk). Metadata absence alone never kills a callable tool,
+    and MCP tools (no http metadata at all) are never metadata-dropped —
+    prefer false-keeps over false-drops.
+    """
     no_desc = not tool.get("description", "").strip()
     no_params = not tool.get("parameters")
     path = tool.get("http_path", "")
-    is_root = path in ("/", "")
-    return (no_desc and no_params) or is_root
+    method = tool.get("http_method", "")
+    if not (method or path):
+        return False
+    return no_desc and no_params and path in ("/", "")
 
 
 _REWRITE_SYSTEM = """You are an expert at writing MCP tool descriptions that AI agents can use reliably.
@@ -181,7 +191,7 @@ _DEDUP_SYSTEM = """You are analysing a list of MCP tools for duplicates.
 Two tools are duplicates if they perform the same operation on the same entity.
 Examples of duplicates:
   - list_users and get_all_users
-  - get_movie and fetch_movie_by_id (if both take an id param)
+  - get_item and fetch_item_by_id (if both take an id param)
 
 Return a JSON object:
 {
@@ -192,6 +202,27 @@ Return a JSON object:
 
 If there are no duplicates, return: {"duplicates": []}
 Return ONLY the JSON object, no markdown."""
+
+
+def _merge_allowed(keep: dict, drop: dict) -> bool:
+    """
+    Deterministic behavior-preservation guard for Gemini-proposed merges.
+
+    A merge is only safe if the two tools demonstrably hit the same
+    operation: identical http_method + http_path. Tools without any HTTP
+    metadata (MCP) must instead declare identical parameter names.
+    """
+    keep_method = (keep.get("http_method") or "").upper()
+    drop_method = (drop.get("http_method") or "").upper()
+    keep_path = keep.get("http_path") or ""
+    drop_path = drop.get("http_path") or ""
+
+    if keep_method or drop_method or keep_path or drop_path:
+        return keep_method == drop_method and keep_path == drop_path
+
+    keep_params = set((keep.get("parameters") or {}).keys())
+    drop_params = set((drop.get("parameters") or {}).keys())
+    return keep_params == drop_params
 
 
 def _find_duplicates(tools: list[dict]) -> list[dict]:
@@ -232,9 +263,21 @@ def clean_manifest(raw_manifest: dict) -> dict:
     tools: list[dict] = manifest.get("tools", [])
     original_count = len(tools)
     dropped: list[str] = []
+    dropped_ids: list[str] = []
     merged: list[str] = []
+    merged_ids: list[str] = []
 
     log.info("Cleaning manifest: %d tools", original_count)
+
+    # ── Stage 0: Ensure stable tool ids (legacy manifests may lack them) ─────
+    # Must run BEFORE renaming so the id is derived from the original name.
+    for tool in tools:
+        if not tool.get("tool_id"):
+            tool["tool_id"] = stable_tool_id(
+                tool.get("name", ""),
+                tool.get("http_method", ""),
+                tool.get("http_path", ""),
+            )
 
     # ── Stage 1: Name normalisation ───────────────────────────────────────────
     for tool in tools:
@@ -249,6 +292,7 @@ def clean_manifest(raw_manifest: dict) -> dict:
         if _is_dead(tool):
             log.info("  Dropped dead tool: %s", tool["name"])
             dropped.append(tool["name"])
+            dropped_ids.append(tool["tool_id"])
         else:
             live_tools.append(tool)
     tools = live_tools
@@ -269,12 +313,31 @@ def clean_manifest(raw_manifest: dict) -> dict:
         log.info("  Checking for duplicates...")
         dupes = _find_duplicates(tools)
         if dupes:
-            drop_names = {d["drop"] for d in dupes}
+            by_name = {t["name"]: t for t in tools}
+            drop_names: set[str] = set()
             for d in dupes:
+                keep_tool = by_name.get(d.get("keep", ""))
+                drop_tool = by_name.get(d.get("drop", ""))
+                if not keep_tool or not drop_tool or keep_tool is drop_tool:
+                    log.warning("  Merge rejected (unknown tool): %s", d)
+                    continue
+                if not _merge_allowed(keep_tool, drop_tool):
+                    log.warning(
+                        "  Merge rejected (method/path mismatch): keep=%s drop=%s (%s)",
+                        d["keep"],
+                        d["drop"],
+                        d.get("reason", ""),
+                    )
+                    continue
                 log.info(
-                    "  Merged: keep=%s drop=%s (%s)", d["keep"], d["drop"], d["reason"]
+                    "  Merged: keep=%s drop=%s (%s)",
+                    d["keep"],
+                    d["drop"],
+                    d.get("reason", ""),
                 )
                 merged.append(d["drop"])
+                merged_ids.append(drop_tool["tool_id"])
+                drop_names.add(d["drop"])
             tools = [t for t in tools if t["name"] not in drop_names]
     manifest["tools"] = tools
     manifest["tool_count"] = len(tools)
@@ -285,7 +348,9 @@ def clean_manifest(raw_manifest: dict) -> dict:
         "original_count": original_count,
         "final_count": len(tools),
         "dropped": dropped,
+        "dropped_ids": dropped_ids,
         "merged": merged,
+        "merged_ids": merged_ids,
     }
 
     log.info(

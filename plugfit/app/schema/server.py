@@ -24,6 +24,7 @@ class ServerOut(BaseModel):
     spec_source: str
     score_before: float | None
     score_after: float | None
+    score_method: str | None = None
     tool_count_before: int | None
     tool_count_after: int | None
     base_url: str | None
@@ -41,6 +42,7 @@ class ScoreSummary(BaseModel):
     name: str
     score_before: float | None
     score_after: float | None
+    score_method: str | None = None
     delta: float | None
     tool_count_before: int | None
     tool_count_after: int | None

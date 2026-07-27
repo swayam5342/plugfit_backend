@@ -13,48 +13,61 @@ log = logging.getLogger("plugfit.eval.mock_server")
 # ── Stub response generator ───────────────────────────────────────────────────
 
 
+def _sample_value(pname: str, spec: Any) -> Any:
+    """Synthesise a plausible value for a declared parameter from its schema."""
+    if not isinstance(spec, dict):
+        return f"sample_{pname}"
+    if spec.get("enum"):
+        return spec["enum"][0]
+    return {
+        "string": f"sample_{pname}",
+        "integer": 1,
+        "number": 1.0,
+        "boolean": False,
+        "array": [],
+        "object": {},
+    }.get(spec.get("type", "string"), f"sample_{pname}")
+
+
 def _stub_response(tool: dict, args: dict[str, Any]) -> dict:
     """
-    Generate a plausible stub response for any tool call.
+    Generate a plausible stub response for any tool call, derived ONLY from
+    the tool's own metadata (http method/path, declared parameter schema,
+    generic verb prefix) — never from specific tool names or any domain.
     The agent sees this and uses it to form its final answer.
     """
     name = tool["name"]
-    params = tool.get("parameters", {})
+    params = tool.get("parameters", {}) or {}
+    method = (tool.get("http_method") or "").upper()
+    path = tool.get("http_path", "")
+
+    # A record shaped like the tool's own schema: echo provided args,
+    # synthesise the rest of the declared fields.
+    record = {p: args.get(p, _sample_value(p, spec)) for p, spec in params.items()}
 
     # If any param is named 'id' or ends with '_id', echo it back
     ids = {k: v for k, v in args.items() if k == "id" or k.endswith("_id")}
 
-    # Generic stubs keyed on common operation verbs
-    if name.startswith(("list_", "get_all_", "get_movies", "get_movie_names")):
+    verb = name.split("_", 1)[0].lower()
+
+    if method == "POST" or verb in ("create", "add", "insert", "post"):
+        return {"id": random.randint(100, 999), "created": True, **record}
+    if method == "DELETE" or verb in ("delete", "remove"):
+        return {"deleted": True, **(ids or record)}
+    if method in ("PUT", "PATCH") or verb in ("update", "patch", "mark", "toggle", "set"):
+        return {"updated": True, **(ids or record)}
+    if verb in ("search", "find", "query"):
         return {
-            "items": [
-                {"id": 1, "title": "Inception", "watched": False},
-                {"id": 2, "title": "Interstellar", "watched": True},
-            ],
-            "count": 2,
-        }
-    if name.startswith(("create_", "add_", "post_", "insert_")):
-        return {"id": random.randint(100, 999), "created": True, **args}
-    if name.startswith(("delete_", "remove_")):
-        return {"deleted": True, **ids}
-    if name.startswith(("update_", "patch_", "mark_", "toggle_")):
-        return {"updated": True, **ids}
-    if name.startswith(("search_", "find_", "query_")):
-        return {
-            "results": [],
-            "total": 0,
+            "results": [record] if record else [],
+            "total": 1 if record else 0,
             "query": args.get("query", args.get("q", "")),
         }
-    if name.startswith(("get_stat", "stat")):
-        return {
-            "genres": {"Action": 5, "Drama": 3},
-            "watched": 4,
-            "unwatched": 6,
-            "avg_rating": 7.8,
-        }
-    if name.startswith("get_"):
-        key = name[4:]
-        return {key: {"id": ids.get("id", 1), **args}}
+    if method == "GET" or verb in ("get", "list", "fetch", "read"):
+        # Single resource when addressed by id (arg or path template),
+        # otherwise a collection.
+        if ids or "{" in path:
+            return {"item": record or dict(ids)}
+        return {"items": [record] if record else [{}], "count": 1}
 
     # Fallback
     return {"ok": True, "tool": name, "args": args}

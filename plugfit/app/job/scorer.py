@@ -94,7 +94,7 @@ Return ONLY a JSON array — no markdown, no code fences:
     "clarity": 8,
     "selectability": 6,
     "param_clarity": 9,
-    "issue": "Unclear when to use this vs get_movies"
+    "issue": "Unclear when to use this vs the similar list tool"
   },
   ...
 ]"""

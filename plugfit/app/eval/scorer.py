@@ -54,9 +54,15 @@ def _is_near_miss(called: str, expected: str) -> bool:
 def classify_outcome(
     task: Task,
     tool_calls: list[ToolCall],
+    name_to_id: dict[str, str] | None = None,
 ) -> tuple[Outcome, float]:
     """
     Classify the outcome of a task run.
+
+    name_to_id maps the evaluated manifest's tool names → stable tool_ids.
+    When provided (and the task carries expected_tool_id), matching is done
+    by id, so a task generated from the cleaned manifest still matches the
+    same tool under its pre-rename name in the raw manifest.
 
     Returns:
         (Outcome, base_score 0.0–1.0)
@@ -80,9 +86,19 @@ def classify_outcome(
     if all(c.is_error for c in tool_calls):
         return Outcome.ERROR, 0.0
 
-    # Check if the right tool was eventually called (not just first)
+    # Check if the right tool was eventually called (not just first).
+    # Match on stable tool_id when available, falling back to name.
+    if name_to_id and task.expected_tool_id:
+        expected_key = task.expected_tool_id
+        def _call_key(c: ToolCall) -> str:
+            return name_to_id.get(c.tool_name, c.tool_name)
+    else:
+        expected_key = task.expected_tool
+        def _call_key(c: ToolCall) -> str:
+            return c.tool_name
+
     right_call = next(
-        (c for c in tool_calls if c.tool_name == task.expected_tool),
+        (c for c in tool_calls if _call_key(c) == expected_key),
         None,
     )
 

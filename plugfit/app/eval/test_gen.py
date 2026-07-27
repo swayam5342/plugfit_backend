@@ -4,7 +4,7 @@ AI Test Generation — Gemini reads the manifest and writes the test suite.
 This is the unlock that makes PlugFit work on any server with zero manual setup.
 No YAML. No hand-written scenarios. Gemini reads the tool list and generates:
 
-  1. Real tasks  — what a genuine user would ask ("list all my unwatched movies")
+  1. Real tasks  — what a genuine user would ask ("list all my open items")
      mapped to the correct tool + required args
   2. Medium tasks — where two tools could plausibly both fit; tests whether
      descriptions are distinct enough for the agent to pick correctly
@@ -152,13 +152,20 @@ Return only the JSON array."""
         log.warning("Gemini test gen failed: %s — using fallback suite", e)
         task_dicts = _fallback_tasks(tools)
 
+    # Resolve tool names → stable ids so eval alignment survives renames:
+    # the generating manifest's names are only valid for that manifest, but
+    # tool_id is identical in both raw and cleaned manifests.
+    id_by_name = {t["name"]: t.get("tool_id", "") for t in tools}
+
     tasks = []
     for td in task_dicts:
         try:
+            expected_tool = td.get("expected_tool", "")
             task = Task(
                 id=str(uuid.uuid4())[:8],
                 instruction=td["instruction"],
-                expected_tool=td.get("expected_tool", ""),
+                expected_tool=expected_tool,
+                expected_tool_id=id_by_name.get(expected_tool, ""),
                 expected_args=td.get("expected_args") or {},
                 is_trap=bool(td.get("is_trap", False)),
                 difficulty=Difficulty(td.get("difficulty", "easy")),

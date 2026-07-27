@@ -194,6 +194,13 @@ class Server(Base):
         nullable=True,
     )
 
+    # Which scorer produced score_before/score_after: "eval" | "heuristic".
+    # Both numbers always come from the same method (see tasks._compute_scores).
+    score_method: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+
     tool_count_before: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,

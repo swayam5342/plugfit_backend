@@ -251,6 +251,7 @@ async def get_score(
         name=server.name,
         score_before=server.score_before,
         score_after=server.score_after,
+        score_method=server.score_method,
         delta=delta,
         tool_count_before=server.tool_count_before,
         tool_count_after=server.tool_count_after,
@@ -279,28 +280,53 @@ async def get_diff(
         raise HTTPException(
             404, detail="Manifest not yet available — pipeline may still be running"
         )
+    return _compute_manifest_diff(
+        server.id, server.raw_manifest, server.cleaned_manifest
+    )
 
+
+def _tool_key(t: dict) -> str:
+    """Stable identity for a tool: tool_id when present, else name (legacy
+    manifests ingested before ids existed)."""
+    return t.get("tool_id") or t["name"]
+
+
+def _compute_manifest_diff(
+    server_id: str, raw_manifest: dict, cleaned_manifest: dict
+) -> ManifestDiff:
+    """Diff before/after manifests aligned on stable tool ids, so a renamed
+    tool matches its pre-rename self instead of showing up as merged/new."""
     before_tools: dict[str, dict] = {
-        t["name"]: t for t in server.raw_manifest.get("tools", [])
+        _tool_key(t): t for t in raw_manifest.get("tools", [])
     }
     after_tools: dict[str, dict] = {
-        t["name"]: t for t in server.cleaned_manifest.get("tools", [])
+        _tool_key(t): t for t in cleaned_manifest.get("tools", [])
     }
 
-    removed = server.cleaned_manifest.get("_cleaning_meta", {}).get("dropped", [])
+    meta = cleaned_manifest.get("_cleaning_meta", {})
+    removed = meta.get("dropped", [])
+    removed_keys = set(meta.get("dropped_ids") or removed)
+    merged_keys = set(meta.get("merged_ids") or meta.get("merged", []))
 
+    # A tool counts as merged only if the cleaner actually merged it away —
+    # or, for legacy manifests without ids, if it vanished without being
+    # dropped (the old name-based heuristic).
     merged: list[str] = [
-        n for n in before_tools if n not in after_tools and n not in removed
+        before_tools[k]["name"]
+        for k in before_tools
+        if k not in after_tools
+        and k not in removed_keys
+        and (not merged_keys or k in merged_keys)
     ]
 
     diffs: list[ToolDiff] = []
-    for name, after in after_tools.items():
-        before = before_tools.get(name)
+    for key, after in after_tools.items():
+        before = before_tools.get(key)
         desc_before = before["description"] if before else None
         desc_after = after.get("description", "")
         diffs.append(
             ToolDiff(
-                name=name,
+                name=after["name"],
                 description_before=desc_before,
                 description_after=desc_after,
                 param_count=len(after.get("parameters", {})),
@@ -311,7 +337,7 @@ async def get_diff(
         f"Manifest diff computed - tools: before={len(before_tools)}, after={len(after_tools)}, removed={len(removed)}"
     )
     return ManifestDiff(
-        server_id=server.id,
+        server_id=server_id,
         tools_before=len(before_tools),
         tools_after=len(after_tools),
         tools_removed=removed,
@@ -437,6 +463,7 @@ def _server_out(server: Server) -> ServerOut:
         spec_source=server.spec_source,
         score_before=server.score_before,
         score_after=server.score_after,
+        score_method=server.score_method,
         tool_count_before=server.tool_count_before,
         tool_count_after=server.tool_count_after,
         base_url=server.base_url,

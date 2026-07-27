@@ -205,6 +205,13 @@ class EvalRunner:
         )
         results: list[TaskResult] = []
 
+        # Map this manifest's tool names → stable ids so classify_outcome
+        # can match expected_tool_id even when names differ (raw vs cleaned).
+        name_to_id = {
+            t["name"]: (t.get("tool_id") or t["name"])
+            for t in self._manifest.get("tools", [])
+        }
+
         for idx, task in enumerate(tasks):
             best: TaskResult | None = None
 
@@ -226,7 +233,9 @@ class EvalRunner:
                     for r in agent_run.tool_calls
                 ]
 
-                outcome, base_score = classify_outcome(task, tool_calls)
+                outcome, base_score = classify_outcome(
+                    task, tool_calls, name_to_id=name_to_id
+                )
                 diff_w = DIFFICULTY_WEIGHTS.get(task.difficulty, 1.0)
                 trap_w = TRAP_BONUS if task.is_trap else 1.0
                 w_score = base_score * OUTCOME_WEIGHTS.get(outcome, 0.0) * diff_w * trap_w

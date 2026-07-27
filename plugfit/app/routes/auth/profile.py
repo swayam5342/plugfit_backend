@@ -53,7 +53,7 @@ async def update_current_user(
             )
         current_user.email = payload.email
         current_user.is_email_verified = False
-        send_verification_email_for(payload.email)
+        send_verification_email_for(current_user.name, payload.email)
         logger.info(f"Email updated for user: {current_user.email} -> {payload.email}")
     if payload.name:
         slug = make_slug(payload.name)

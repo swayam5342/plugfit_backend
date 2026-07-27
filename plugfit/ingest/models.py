@@ -1,5 +1,15 @@
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+
+def stable_tool_id(name: str, http_method: str = "", http_path: str = "") -> str:
+    """Deterministic per-tool id derived from the tool's identity at ingest
+    time (original name + http coordinates), BEFORE any renaming. The same
+    spec always yields the same ids, and cleaning-stage renames never change
+    them — downstream (eval, diff, dedup) aligns before↔after on this id."""
+    key = f"{http_method.upper()}|{http_path}|{name}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass
@@ -37,9 +47,11 @@ class CanonicalTool:
     tags: list[str] = field(default_factory=list)
     http_method: str = ""
     http_path: str = ""
+    tool_id: str = ""
 
     def to_dict(self) -> dict:
         return {
+            "tool_id": self.tool_id,
             "name": self.name,
             "description": self.description,
             "parameters": {k: v.to_dict() for k, v in self.parameters.items()},
@@ -59,6 +71,13 @@ class ToolManifest:
     title: str = ""
     version: str = ""
     warnings: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Every parser builds a ToolManifest, so this single hook guarantees
+        # ids exist on all tools regardless of source (openapi/mcp/inline).
+        for t in self.tools:
+            if not t.tool_id:
+                t.tool_id = stable_tool_id(t.name, t.http_method, t.http_path)
 
     def to_dict(self) -> dict:
         return {

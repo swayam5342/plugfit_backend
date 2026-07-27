@@ -6,11 +6,53 @@ from sqlalchemy import select
 from .celery import celery_app
 from plugfit.app.db.db_sync import sync_db_session
 from .cleaner import clean_manifest
-from .scorer import heuristic_score, gemini_score
+from .scorer import heuristic_score
 from plugfit.app.models.models import Job, JobStatus, Server, ServerStatus
 from plugfit.app.config import settings
 
 log = logging.getLogger("plugfit.tasks")
+
+
+def _compute_scores(
+    raw_manifest: dict, cleaned_manifest: dict
+) -> tuple[float, float, str, object | None]:
+    """
+    Produce the headline (score_before, score_after) pair.
+
+    Both numbers ALWAYS come from the same scorer so the delta is meaningful:
+    the eval pipeline when Gemini is available and succeeds, otherwise the
+    deterministic heuristic for BOTH sides. Never heuristic-before vs
+    LLM-after.
+
+    Returns (score_before, score_after, score_method, comparison_or_None).
+    """
+    if settings.GEMINI_API_KEY:
+        try:
+            from plugfit.app.eval.pipeline import run_eval_pipeline
+
+            comparison = run_eval_pipeline(
+                raw_manifest=raw_manifest,
+                cleaned_manifest=cleaned_manifest,
+                gemini_api_key=settings.GEMINI_API_KEY,
+                model=settings.AI_MODEL_NAME,
+                runs_per_task=1,
+            )
+            return (
+                comparison.before.score,
+                comparison.after.score,
+                "eval",
+                comparison,
+            )
+        except Exception as exc:
+            log.warning(
+                "Eval pipeline failed: %s — falling back to heuristic scoring", exc
+            )
+    return (
+        heuristic_score(raw_manifest),
+        heuristic_score(cleaned_manifest),
+        "heuristic",
+        None,
+    )
 
 
 def _ts() -> str:
@@ -77,8 +119,12 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
             job_id, "loading", f"Loaded {tool_count_before} tools from '{server_name}'"
         )
         _append_log(job_id, "scoring", "Scoring raw manifest (before cleaning)")
-        score_before = heuristic_score(raw_manifest)
-        _append_log(job_id, "scoring", f"Before score: {score_before}/100 (heuristic)")
+        preview_score = heuristic_score(raw_manifest)
+        _append_log(
+            job_id,
+            "scoring",
+            f"Heuristic preview: {preview_score}/100 (final scores computed after cleaning)",
+        )
 
         # ── Stage 3: Clean ────────────────────────────────────────────────────
         _append_log(job_id, "cleaning", "Running Gemini cleaning engine")
@@ -104,59 +150,26 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
             f"Cleaning done: {tool_count_before} → {tool_count_after} tools",
         )
 
-        # ── Stage 4: MCP eval (before/after tool-call accuracy) ──────────────
+        # ── Stage 4: Score (one scorer for BOTH sides — see _compute_scores) ─
         _append_log(job_id, "evaluating", "Running MCP eval (tool-call accuracy)")
-        feedback: list[dict] = []
-        eval_ran = False
-
-        if settings.GEMINI_API_KEY:
-            try:
-                from plugfit.app.eval.pipeline import run_eval_pipeline
-
-                comparison = run_eval_pipeline(
-                    raw_manifest=raw_manifest,
-                    cleaned_manifest=cleaned_manifest,
-                    gemini_api_key=settings.GEMINI_API_KEY,
-                    model=settings.AI_MODEL_NAME,
-                    runs_per_task=1,
-                )
-                score_before = comparison.before.score
-                score_after = comparison.after.score
-                eval_ran = True
-                _append_log(
-                    job_id,
-                    "evaluating",
-                    f"Eval complete: {score_before:.1f} → {score_after:.1f}"
-                    f"  (Δ {comparison.delta:+.1f})",
-                )
-            except Exception as exc:
-                log.warning(
-                    "Eval pipeline failed: %s — falling back to Gemini score", exc
-                )
-
-        if not eval_ran:
+        score_before, score_after, score_method, comparison = _compute_scores(
+            raw_manifest, cleaned_manifest
+        )
+        if score_method == "eval":
             _append_log(
                 job_id,
                 "evaluating",
-                "Scoring cleaned manifest with Gemini (eval pipeline unavailable)",
+                f"Eval complete: {score_before:.1f} → {score_after:.1f}"
+                f"  (Δ {comparison.delta:+.1f})",  # type: ignore[union-attr]
             )
-            score_after, feedback = gemini_score(cleaned_manifest)
-            if feedback:
-                cleaned_manifest["_score_feedback"] = feedback
+        else:
             _append_log(
                 job_id,
                 "evaluating",
-                f"After score: {score_after}/100  (Δ {score_after - score_before:+.1f})",
+                f"Eval unavailable — heuristic scoring both sides: "
+                f"{score_before:.1f} → {score_after:.1f}",
             )
-            bad = [
-                f["name"]
-                for f in feedback
-                if (f.get("clarity", 10) < 5 or f.get("selectability", 10) < 5)
-            ]
-            if bad:
-                _append_log(
-                    job_id, "evaluating", f"Tools still needing attention: {bad}"
-                )
+
         _append_log(job_id, "saving", "Persisting results to database")
         with sync_db_session() as db:
             server = db.execute(
@@ -166,6 +179,7 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
                 server.cleaned_manifest = cleaned_manifest
                 server.score_before = score_before
                 server.score_after = score_after
+                server.score_method = score_method
                 server.tool_count_after = tool_count_after
                 server.status = ServerStatus.READY
 
@@ -267,6 +281,7 @@ def run_eval_only(self, server_id: str, job_id: str) -> dict:
             if server:
                 server.score_before = score_before
                 server.score_after = score_after
+                server.score_method = "eval"
                 server.status = ServerStatus.READY
 
         _set_job(job_id, JobStatus.DONE)

@@ -121,9 +121,9 @@ uv.lock
 
 # pyenv
 .python-version
-
-*test.py
-test
 !.example.env
 Note
 PlugFit - Resources.md
+session.md
+agents.md
+tmp

@@ -68,11 +68,13 @@ class Task:
     is_trap:       bool = False
     difficulty:    Difficulty = Difficulty.EASY
     rationale:     str = ""
+    expected_tool_id: str = ""  # stable id; survives cleaning-stage renames
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "instruction": self.instruction,
             "expected_tool": self.expected_tool,
+            "expected_tool_id": self.expected_tool_id,
             "expected_args": self.expected_args,
             "is_trap": self.is_trap,
             "difficulty": self.difficulty.value,
