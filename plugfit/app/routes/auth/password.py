@@ -1,14 +1,14 @@
 import logging
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from plugfit.app.db.db import get_db
 from plugfit.app.models.models import RefreshToken, User
-from plugfit.app.schema.auth import Token, UserCreate, UserOut
+from plugfit.app.schema.auth import RefreshRequest, Token, UserCreate, UserOut
 from plugfit.app.utils.auth.token import (
     hash_password,
     hash_refresh_token,
@@ -18,7 +18,7 @@ from plugfit.app.utils.db.funcs import utcnow
 from plugfit.app.utils.db.get_users import get_user_by_email, get_user_by_id
 
 from .email_verification import send_verification_email_for
-from .security import REFRESH_COOKIE_NAME, clear_refresh_cookie, issue_token_pair
+from .security import issue_token_pair
 from plugfit.app.utils.auth.make_slug import make_slug
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,6 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)) -> U
 
 @router.post("/login", response_model=Token)
 async def login(
-    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> Token:
@@ -87,15 +86,14 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token, _ = await issue_token_pair(db, user, response)
+    token, _ = await issue_token_pair(db, user)
     logger.info(f"User logged in successfully: {user.email} (ID: {user.id})")
     return token
 
 
 @router.post("/refresh", response_model=Token)
 async def refresh(
-    request: Request,
-    response: Response,
+    body: RefreshRequest,
     db: AsyncSession = Depends(get_db),
 ) -> Token:
     logger.debug("Token refresh attempt")
@@ -105,10 +103,7 @@ async def refresh(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    raw_token = request.cookies.get(REFRESH_COOKIE_NAME)
-    if not raw_token:
-        logger.warning("Token refresh failed - no refresh token found")
-        raise invalid
+    raw_token = body.refresh_token
 
     token_hash = hash_refresh_token(raw_token)
     result = await db.execute(
@@ -122,7 +117,6 @@ async def refresh(
 
     if stored.revoked_at is not None:
         logger.warning("Token refresh failed - token already revoked")
-        clear_refresh_cookie(response)
         raise invalid
 
     if stored.expires_at <= utcnow():
@@ -134,7 +128,7 @@ async def refresh(
         logger.warning("Token refresh failed - user not found or inactive")
         raise invalid
 
-    new_token, new_row = await issue_token_pair(db, user, response)
+    new_token, new_row = await issue_token_pair(db, user)
 
     stored.revoked_at = utcnow()
     stored.replaced_by = new_row.id
@@ -145,21 +139,16 @@ async def refresh(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    request: Request,
-    response: Response,
+    body: RefreshRequest,
     db: AsyncSession = Depends(get_db),
 ) -> None:
     logger.info("User logout attempt")
-    raw_token = request.cookies.get(REFRESH_COOKIE_NAME)
-    if raw_token:
-        token_hash = hash_refresh_token(raw_token)
-        result = await db.execute(
-            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
-        )
-        stored = result.scalar_one_or_none()
-        if stored and stored.revoked_at is None:
-            stored.revoked_at = utcnow()
-            await db.commit()
-            logger.info("User logged out successfully")
-
-    clear_refresh_cookie(response)
+    token_hash = hash_refresh_token(body.refresh_token)
+    result = await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+    )
+    stored = result.scalar_one_or_none()
+    if stored and stored.revoked_at is None:
+        stored.revoked_at = utcnow()
+        await db.commit()
+        logger.info("User logged out successfully")

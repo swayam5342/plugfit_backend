@@ -165,7 +165,7 @@ async def google_callback(
                 f"New user created via Google OAuth: {google_email} (ID: {user.id})"
             )
         db.add(oauth_row)
-    token, _ = await issue_token_pair(db, user, response)
+    token, _ = await issue_token_pair(db, user)
     logger.info(f"Google OAuth login successful: {user.email} (ID: {user.id})")
     return token
 

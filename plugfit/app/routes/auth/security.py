@@ -1,6 +1,5 @@
 from datetime import timedelta
 
-from fastapi import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from plugfit.app.config import settings
@@ -13,28 +12,9 @@ from plugfit.app.utils.auth.token import (
 )
 from plugfit.app.utils.db.funcs import utcnow
 
-REFRESH_COOKIE_NAME = "refresh_token"
-REFRESH_COOKIE_PATH = "/auth"
-
-
-def set_refresh_cookie(response: Response, raw_token: str) -> None:
-    response.set_cookie(
-        key=REFRESH_COOKIE_NAME,
-        value=raw_token,
-        httponly=True,
-        secure=settings.COOKIE_SECURE,
-        samesite="lax",
-        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 60 * 60,
-        path=REFRESH_COOKIE_PATH,
-    )
-
-
-def clear_refresh_cookie(response: Response) -> None:
-    response.delete_cookie(key=REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
-
 
 async def issue_token_pair(
-    db: AsyncSession, user: User, response: Response
+    db: AsyncSession, user: User
 ) -> tuple[Token, RefreshToken]:
     access_token = create_access_token(
         subject=user.id,
@@ -50,5 +30,4 @@ async def issue_token_pair(
     db.add(refresh_row)
     await db.commit()
     await db.refresh(refresh_row)
-    set_refresh_cookie(response, raw_refresh)
-    return Token(access_token=access_token), refresh_row
+    return Token(access_token=access_token, refresh_token=raw_refresh), refresh_row
