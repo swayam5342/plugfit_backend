@@ -1,0 +1,21 @@
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.git
+.github
+.pytest_cache
+.hooks
+logs
+tmp
+test
+plugfit_dev.db
+*.db
+.env
+session.md
+agents.md
+PlugFit - Resources.md
+README.md
+CODE_OF_CONDUCT.md
+contributing.md
+LICENSE

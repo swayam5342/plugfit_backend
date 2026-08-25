@@ -62,13 +62,15 @@ class Settings(BaseSettings):
 
     PIPELINE_TIMEOUT_SECONDS: int = Field(default=120)
 
-    PIPELINE_MAX_RETRY: int = Field(default=3)
+    PIPELINE_MAX_RETRY: int = Field(default=5)
 
     PIPELINE_WORKERS: int = Field(default=1)
 
     MCP_BASE_PATH: str = Field(default="mcp")
 
     AI_MODEL_NAME: str = Field(default="gemini-flash-latest")
+
+    ENABLE_FILE_LOGGING: bool = Field(default=True)
 
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "*"]
