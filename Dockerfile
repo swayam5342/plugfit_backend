@@ -7,7 +7,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+    build-essential \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -20,4 +20,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8067
 
-CMD ["uv", "run", "uvicorn", "plugfit.app.app:app", "--host", "0.0.0.0", "--port", "8067"]
+CMD ["uvicorn", "plugfit.app.app:app", "--host", "0.0.0.0", "--port", "8067"]

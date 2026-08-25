@@ -45,7 +45,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://plugfit:plugfit@postgres/plugfit
       REDIS_URL: redis://redis:6379/0
-    command: ["uv", "run", "celery", "-A", "plugfit.app.job.celery", "worker", "--loglevel=info"]
+    command: ["celery", "-A", "plugfit.app.job.celery", "worker", "--loglevel=info"]
     depends_on:
       postgres:
         condition: service_healthy
