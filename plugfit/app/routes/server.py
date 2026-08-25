@@ -88,10 +88,19 @@ async def create_server(
         None,
         description="JSON object of headers",
     ),
+    project_id: str | None = Form(
+        None,
+        description="Optional project to assign this server to on creation",
+    ),
     tenant: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ServerOut:
     logger.info(f"Server creation request: name='{name}', user_id={tenant.id}")
+    if project_id is not None:
+        from plugfit.app.routes.project import _get_project_for_tenant
+
+        await _get_project_for_tenant(project_id, tenant, db)
+
     if (spec_file is None) == (spec_url is None):
         logger.warning(
             f"Server creation failed - ambiguous spec source (file={spec_file is not None}, url={spec_url is not None})"
@@ -162,6 +171,7 @@ async def create_server(
         user_id=tenant.id,
         name=name,
         slug=_slugify(name),
+        project_id=project_id,
         status=ServerStatus.PROCESSING,
         spec_source=SpecSource(manifest.source_type),
         raw_spec=raw_spec,
@@ -457,6 +467,7 @@ def _server_out(server: Server) -> ServerOut:
     return ServerOut(
         id=server.id,
         tenant_id=server.user_id,
+        project_id=server.project_id,
         name=server.name,
         slug=server.slug,
         status=server.status,

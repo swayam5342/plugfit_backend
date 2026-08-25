@@ -119,8 +119,73 @@ class User(Base):
         passive_deletes=True,
     )
 
+    projects: Mapped[list["Project"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     def __repr__(self) -> str:
         return f"<User {self.email}>"
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "slug",
+            name="uq_project_user_slug",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=new_uuid,
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+    )
+
+    slug: Mapped[str] = mapped_column(
+        String(60),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="projects",
+    )
+
+    servers: Mapped[list["Server"]] = relationship(
+        back_populates="project",
+    )
+
+    def __repr__(self) -> str:
+        return f"<Project {self.slug}>"
 
 
 class Server(Base):
@@ -155,6 +220,13 @@ class Server(Base):
     slug: Mapped[str] = mapped_column(
         String(60),
         nullable=False,
+    )
+
+    project_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
 
     status: Mapped[ServerStatus] = mapped_column(
@@ -235,6 +307,10 @@ class Server(Base):
     )
 
     user: Mapped["User"] = relationship(
+        back_populates="servers",
+    )
+
+    project: Mapped["Project | None"] = relationship(
         back_populates="servers",
     )
 

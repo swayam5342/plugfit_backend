@@ -18,6 +18,7 @@ class ServerCreate(BaseModel):
 class ServerOut(BaseModel):
     id: str
     tenant_id: str
+    project_id: str | None = None
     name: str
     slug: str
     status: str

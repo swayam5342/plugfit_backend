@@ -5,6 +5,7 @@ from .config import settings
 from .db.db import init_db
 from .routes.auth import router as authrouter
 from .routes.server import router as serverrouter
+from .routes.project import router as projectrouter
 from .routes.mcp import router as mcprouter
 from plugfit.app.logging import setup_logging
 from starlette.requests import Request
@@ -59,6 +60,7 @@ async def log_request(request: Request, call_next):
 
 app.include_router(authrouter, prefix="/auth")
 app.include_router(serverrouter)
+app.include_router(projectrouter)
 app.include_router(mcprouter)
 
 
