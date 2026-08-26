@@ -6,7 +6,7 @@ def send_password_reset_email(username: str, email: str, reset_link: str):
     payload = {
         "from": f"Plugfit <{settings.RESEND_FROM_EMAIL}>",
         "to": [email],
-        "subject": "Verify your email",
+        "subject": "Reset your password",
         "template": {
             "id": "password-reset",
             "variables": {

@@ -38,8 +38,9 @@ async def forgot_password(
         )
         db.add(reset_entry)
         await db.commit()
+        reset_link = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
         send_password_reset_email(
-            username=user.name, email=user.email, reset_link=raw_token
+            username=user.name, email=user.email, reset_link=reset_link
         )
         logger.info(f"Password reset email sent for user: {payload.email}")
     else:

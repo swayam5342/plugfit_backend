@@ -1,5 +1,6 @@
 import logging
 import secrets
+import urllib.parse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -31,6 +32,7 @@ OAUTH_STATE_MAX_AGE = 60 * 10
 @router.get("/google")
 async def google_login() -> RedirectResponse:
     logger.info("Google OAuth login initiated")
+    state = secrets.token_urlsafe(32)
     params = {
         "client_id": settings.GOOGLE_CLIENT_ID,
         "redirect_uri": settings.GOOGLE_REDIRECT_URI,
@@ -38,10 +40,10 @@ async def google_login() -> RedirectResponse:
         "scope": GOOGLE_SCOPES,
         "access_type": "offline",
         "prompt": "select_account",
+        "state": state,
     }
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    query = urllib.parse.urlencode(params)
     redirect = RedirectResponse(url=f"{GOOGLE_AUTH_URL}?{query}")
-    state = secrets.token_urlsafe(32)
     redirect.set_cookie(
         key=OAUTH_STATE_COOKIE,
         value=state,
@@ -139,6 +141,12 @@ async def google_callback(
                 )
             if not user.is_email_verified:
                 user.is_email_verified = True
+            oauth_row = OAuthAccount(
+                user_id=user.id,
+                provider="google",
+                provider_user_id=google_sub,
+                provider_email=google_email,
+            )
             logger.info(f"Existing user linked with Google OAuth: {google_email}")
         else:
             slug = make_slug(google_name)

@@ -88,11 +88,14 @@ def decode_verification_token(token: str) -> dict:
         payload = jwt.decode(
             token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]
         )
-        if payload.get("purpose") != "email-verification":
-            raise TokenError("Invalid token purpose")
-        return payload
-    except exceptions.ExpiredSignatureError:
-        raise TokenError("Token has expired")
+    except exceptions.ExpiredSignatureError as exc:
+        raise TokenError("Token has expired") from exc
+    except JWTError as exc:
+        raise TokenError("Invalid token") from exc
+
+    if payload.get("purpose") != "email-verification":
+        raise TokenError("Invalid token purpose")
+    return payload
 
 
 def create_refresh_token() -> str:

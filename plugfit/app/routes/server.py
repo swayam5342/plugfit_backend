@@ -58,6 +58,18 @@ def _slugify(text: str) -> str:
     return s[:60] or "server"
 
 
+async def _unique_server_slug(name: str, tenant_id: str, db: AsyncSession) -> str:
+    import secrets
+
+    slug = _slugify(name)
+    result = await db.execute(
+        select(Server).where(Server.user_id == tenant_id, Server.slug == slug)
+    )
+    if result.scalar_one_or_none():
+        slug = f"{slug[:51]}-{secrets.token_hex(4)}"
+    return slug
+
+
 async def _get_server_for_tenant(
     server_id: str, tenant: User, db: AsyncSession
 ) -> Server:
@@ -131,9 +143,25 @@ async def create_server(
 
         raw_spec = raw_bytes.decode("utf-8", errors="replace")
 
-        ingest_input = (
-            json.loads(raw_spec) if raw_spec.strip().startswith("{") else raw_spec
-        )
+        try:
+            ingest_input = json.loads(raw_spec)
+        except json.JSONDecodeError:
+            import yaml
+
+            try:
+                ingest_input = yaml.safe_load(raw_spec)
+            except yaml.YAMLError:
+                logger.warning("Server creation failed - spec is neither JSON nor YAML")
+                raise HTTPException(
+                    422, detail="Spec file is neither valid JSON nor valid YAML"
+                )
+        if not isinstance(ingest_input, (dict, list)):
+            logger.warning(
+                f"Server creation failed - spec parsed to {type(ingest_input).__name__}, not an object/array"
+            )
+            raise HTTPException(
+                422, detail="Spec file must contain a JSON/YAML object or array"
+            )
 
     else:
         logger.debug(f"Processing spec from URL: {spec_url}")
@@ -174,7 +202,7 @@ async def create_server(
     server = Server(
         user_id=tenant.id,
         name=name,
-        slug=_slugify(name),
+        slug=await _unique_server_slug(name, tenant.id, db),
         project_id=project_id,
         status=ServerStatus.PROCESSING,
         spec_source=SpecSource(manifest.source_type),
