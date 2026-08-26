@@ -6,6 +6,7 @@ from sqlalchemy import select
 from .celery import celery_app
 from plugfit.app.db.db_sync import sync_db_session
 from .cleaner import clean_manifest
+from .run_logs import log_change, log_happening
 from .scorer import heuristic_score
 from plugfit.app.models.models import Job, JobStatus, Server, ServerStatus
 from plugfit.app.config import settings
@@ -59,7 +60,11 @@ def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _append_log(job_id: str, stage: str, message: str) -> None:
+def _append_log(server_id: str, job_id: str, stage: str, message: str) -> None:
+    """The single choke point for every stage-transition message: writes to
+    the DB (`Job.logs`/`job.stage`, unchanged behavior), then mirrors the
+    same event to the files-only, append-only happening log (Phase 4;
+    best-effort, never raises — see run_logs.py)."""
     with sync_db_session() as db:
         job = db.execute(select(Job).where(Job.id == job_id)).scalar_one_or_none()
         if not job:
@@ -68,24 +73,43 @@ def _append_log(job_id: str, stage: str, message: str) -> None:
         job.logs = [*job.logs, entry]
         job.stage = stage
     log.info("[job:%s] [%s] %s", job_id[:8], stage, message)
+    log_happening(server_id, job_id, stage, message)
 
 
-def _set_job(job_id: str, status: JobStatus, error: str | None = None) -> None:
+def _set_job(
+    server_id: str, job_id: str, status: JobStatus, error: str | None = None
+) -> None:
+    """Set the job's status, capturing the prior value first so the
+    transition can be recorded as a `job_status` change-log entry."""
+    old_status = None
     with sync_db_session() as db:
         job = db.execute(select(Job).where(Job.id == job_id)).scalar_one_or_none()
-        if job:
-            job.status = status
-            if error:
-                job.error = error[:2000]
+        if not job:
+            return
+        old_status = job.status
+        job.status = status
+        if error:
+            job.error = error[:2000]
+    if old_status is not None and old_status != status:
+        log_change(
+            server_id, job_id, "job_status", **{"from": old_status.value, "to": status.value}
+        )
 
 
-def _set_server_status(server_id: str, status: ServerStatus) -> None:
+def _set_server_status(server_id: str, job_id: str, status: ServerStatus) -> None:
+    """Set the server's status, capturing the prior value first so the
+    transition can be recorded as a `server_status` change-log entry."""
+    old_status = None
     with sync_db_session() as db:
-        s = db.execute(
-            select(Server).where(Server.id == server_id)
-        ).scalar_one_or_none()
-        if s:
-            s.status = status
+        s = db.execute(select(Server).where(Server.id == server_id)).scalar_one_or_none()
+        if not s:
+            return
+        old_status = s.status
+        s.status = status
+    if old_status is not None and old_status != status:
+        log_change(
+            server_id, job_id, "server_status", **{"from": old_status.value, "to": status.value}
+        )
 
 
 @celery_app.task(
@@ -97,10 +121,10 @@ def _set_server_status(server_id: str, status: ServerStatus) -> None:
 )
 def run_pipeline(self, server_id: str, job_id: str) -> dict:
     log.info("Pipeline started: server=%s job=%s", server_id[:8], job_id[:8])
-    _set_job(job_id, JobStatus.RUNNING)
+    _set_job(server_id, job_id, JobStatus.RUNNING)
 
     try:
-        _append_log(job_id, "loading", "Loading server from database")
+        _append_log(server_id, job_id, "loading", "Loading server from database")
         with sync_db_session() as db:
             server = db.execute(
                 select(Server).where(Server.id == server_id)
@@ -116,47 +140,70 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
 
         tool_count_before = len(raw_manifest.get("tools", []))
         _append_log(
-            job_id, "loading", f"Loaded {tool_count_before} tools from '{server_name}'"
+            server_id,
+            job_id,
+            "loading",
+            f"Loaded {tool_count_before} tools from '{server_name}'",
         )
-        _append_log(job_id, "scoring", "Scoring raw manifest (before cleaning)")
+        _append_log(server_id, job_id, "scoring", "Scoring raw manifest (before cleaning)")
         preview_score = heuristic_score(raw_manifest)
         _append_log(
+            server_id,
             job_id,
             "scoring",
             f"Heuristic preview: {preview_score}/100 (final scores computed after cleaning)",
         )
 
         # ── Stage 3: Clean ────────────────────────────────────────────────────
-        _append_log(job_id, "cleaning", "Running Gemini cleaning engine")
-        _append_log(job_id, "cleaning", "Step 1/3: normalising tool names")
+        _append_log(server_id, job_id, "cleaning", "Running Gemini cleaning engine")
+        _append_log(server_id, job_id, "cleaning", "Step 1/3: normalising tool names")
 
         cleaned_manifest = clean_manifest(raw_manifest)
 
         meta = cleaned_manifest.get("_cleaning_meta", {})
         tool_count_after = cleaned_manifest.get("tool_count", 0)
-        _append_log(job_id, "cleaning", f"Step 2/3: rewrote descriptions via Gemini")
+        _append_log(server_id, job_id, "cleaning", "Step 2/3: rewrote descriptions via Gemini")
         if meta.get("dropped"):
             _append_log(
-                job_id, "cleaning", f"Step 3/3: dropped dead tools: {meta['dropped']}"
+                server_id,
+                job_id,
+                "cleaning",
+                f"Step 3/3: dropped dead tools: {meta['dropped']}",
             )
         if meta.get("merged"):
             _append_log(
-                job_id, "cleaning", f"Step 3/3: merged duplicates: {meta['merged']}"
+                server_id,
+                job_id,
+                "cleaning",
+                f"Step 3/3: merged duplicates: {meta['merged']}",
             )
 
         _append_log(
+            server_id,
             job_id,
             "cleaning",
             f"Cleaning done: {tool_count_before} → {tool_count_after} tools",
         )
+        log_change(server_id, job_id, "tool_count", **{"from": tool_count_before, "to": tool_count_after})
+        if meta.get("dropped"):
+            log_change(
+                server_id, job_id, "tools_dropped",
+                names=meta.get("dropped"), ids=meta.get("dropped_ids"),
+            )
+        if meta.get("merged"):
+            log_change(
+                server_id, job_id, "tools_merged",
+                names=meta.get("merged"), ids=meta.get("merged_ids"),
+            )
 
         # ── Stage 4: Score (one scorer for BOTH sides — see _compute_scores) ─
-        _append_log(job_id, "evaluating", "Running MCP eval (tool-call accuracy)")
+        _append_log(server_id, job_id, "evaluating", "Running MCP eval (tool-call accuracy)")
         score_before, score_after, score_method, comparison = _compute_scores(
             raw_manifest, cleaned_manifest
         )
         if score_method == "eval":
             _append_log(
+                server_id,
                 job_id,
                 "evaluating",
                 f"Eval complete: {score_before:.1f} → {score_after:.1f}"
@@ -164,27 +211,40 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
             )
         else:
             _append_log(
+                server_id,
                 job_id,
                 "evaluating",
                 f"Eval unavailable — heuristic scoring both sides: "
                 f"{score_before:.1f} → {score_after:.1f}",
             )
+        log_change(
+            server_id, job_id, "score",
+            **{"from": score_before, "to": score_after, "method": score_method},
+        )
 
-        _append_log(job_id, "saving", "Persisting results to database")
+        _append_log(server_id, job_id, "saving", "Persisting results to database")
+        old_server_status = None
         with sync_db_session() as db:
             server = db.execute(
                 select(Server).where(Server.id == server_id)
             ).scalar_one_or_none()
             if server:
+                old_server_status = server.status
                 server.cleaned_manifest = cleaned_manifest
                 server.score_before = score_before
                 server.score_after = score_after
                 server.score_method = score_method
                 server.tool_count_after = tool_count_after
                 server.status = ServerStatus.READY
+        if server and old_server_status != ServerStatus.READY:
+            log_change(
+                server_id, job_id, "server_status",
+                **{"from": old_server_status.value, "to": ServerStatus.READY.value},
+            )
 
-        _set_job(job_id, JobStatus.DONE)
+        _set_job(server_id, job_id, JobStatus.DONE)
         _append_log(
+            server_id,
             job_id,
             "done",
             f"Pipeline complete ✓  Score: {score_before} → {score_after}",
@@ -211,9 +271,9 @@ def run_pipeline(self, server_id: str, job_id: str) -> dict:
         log.exception("Pipeline failed: server=%s job=%s", server_id[:8], job_id[:8])
         err_msg = str(exc)
 
-        _set_job(job_id, JobStatus.FAILED, error=err_msg)
-        _set_server_status(server_id, ServerStatus.ERROR)
-        _append_log(job_id, "failed", f"Pipeline failed: {err_msg}")
+        _set_job(server_id, job_id, JobStatus.FAILED, error=err_msg)
+        _set_server_status(server_id, job_id, ServerStatus.ERROR)
+        _append_log(server_id, job_id, "failed", f"Pipeline failed: {err_msg}")
         transient = any(
             k in err_msg.lower()
             for k in ("rate limit", "quota", "timeout", "connection", "503", "429")
@@ -234,10 +294,10 @@ def run_eval_only(self, server_id: str, job_id: str) -> dict:
     """Re-run just the MCP eval (before/after tool-call accuracy) using the
     manifests already stored on the server — no re-cleaning."""
     log.info("Eval-only started: server=%s job=%s", server_id[:8], job_id[:8])
-    _set_job(job_id, JobStatus.RUNNING)
+    _set_job(server_id, job_id, JobStatus.RUNNING)
 
     try:
-        _append_log(job_id, "loading", "Loading server manifests from database")
+        _append_log(server_id, job_id, "loading", "Loading server manifests from database")
         with sync_db_session() as db:
             server = db.execute(
                 select(Server).where(Server.id == server_id)
@@ -254,7 +314,7 @@ def run_eval_only(self, server_id: str, job_id: str) -> dict:
                 "pipeline first"
             )
 
-        _append_log(job_id, "evaluating", "Running MCP eval (tool-call accuracy)")
+        _append_log(server_id, job_id, "evaluating", "Running MCP eval (tool-call accuracy)")
         from plugfit.app.eval.pipeline import run_eval_pipeline
 
         comparison = run_eval_pipeline(
@@ -267,26 +327,38 @@ def run_eval_only(self, server_id: str, job_id: str) -> dict:
         score_before = comparison.before.score
         score_after = comparison.after.score
         _append_log(
+            server_id,
             job_id,
             "evaluating",
             f"Eval complete: {score_before:.1f} → {score_after:.1f}"
             f"  (Δ {comparison.delta:+.1f})",
         )
+        log_change(
+            server_id, job_id, "score",
+            **{"from": score_before, "to": score_after, "method": "eval"},
+        )
 
-        _append_log(job_id, "saving", "Persisting results to database")
+        _append_log(server_id, job_id, "saving", "Persisting results to database")
+        old_server_status = None
         with sync_db_session() as db:
             server = db.execute(
                 select(Server).where(Server.id == server_id)
             ).scalar_one_or_none()
             if server:
+                old_server_status = server.status
                 server.score_before = score_before
                 server.score_after = score_after
                 server.score_method = "eval"
                 server.status = ServerStatus.READY
+        if server and old_server_status != ServerStatus.READY:
+            log_change(
+                server_id, job_id, "server_status",
+                **{"from": old_server_status.value, "to": ServerStatus.READY.value},
+            )
 
-        _set_job(job_id, JobStatus.DONE)
+        _set_job(server_id, job_id, JobStatus.DONE)
         _append_log(
-            job_id, "done", f"Eval complete ✓  Score: {score_before} → {score_after}"
+            server_id, job_id, "done", f"Eval complete ✓  Score: {score_before} → {score_after}"
         )
 
         log.info(
@@ -307,9 +379,9 @@ def run_eval_only(self, server_id: str, job_id: str) -> dict:
         log.exception("Eval-only failed: server=%s job=%s", server_id[:8], job_id[:8])
         err_msg = str(exc)
 
-        _set_job(job_id, JobStatus.FAILED, error=err_msg)
-        _set_server_status(server_id, ServerStatus.ERROR)
-        _append_log(job_id, "failed", f"Eval failed: {err_msg}")
+        _set_job(server_id, job_id, JobStatus.FAILED, error=err_msg)
+        _set_server_status(server_id, job_id, ServerStatus.ERROR)
+        _append_log(server_id, job_id, "failed", f"Eval failed: {err_msg}")
         transient = any(
             k in err_msg.lower()
             for k in ("rate limit", "quota", "timeout", "connection", "503", "429")
@@ -327,11 +399,21 @@ def run_eval_only(self, server_id: str, job_id: str) -> dict:
     acks_late=True,
 )
 def run_heal_only(self, server_id: str, job_id: str) -> dict:
+    """
+    Self-healing loop (Phase 6 / F-05): iteratively rewrite low-quality tool
+    descriptions on the already-cleaned manifest, keeping only changes that
+    clear the measured noise floor on a held-out-safe subset, and confirm
+    the whole run on a held-out task slice the loop never touched.
+
+    Never overwrites `cleaned_manifest`/`raw_manifest` or `score_after` —
+    writes only to `healed_manifest`/`score_healed`/`healing_meta`. No
+    auto-promotion: MCP serving is unaffected by this task.
+    """
     log.info("Heal started: server=%s job=%s", server_id[:8], job_id[:8])
-    _set_job(job_id, JobStatus.RUNNING)
+    _set_job(server_id, job_id, JobStatus.RUNNING)
 
     try:
-        _append_log(job_id, "loading", "Loading server manifest from database")
+        _append_log(server_id, job_id, "loading", "Loading server manifest from database")
         with sync_db_session() as db:
             server = db.execute(
                 select(Server).where(Server.id == server_id)
@@ -355,7 +437,7 @@ def run_heal_only(self, server_id: str, job_id: str) -> dict:
         )
         from plugfit.app.job.healing_loop import run_healing_loop
 
-        _append_log(job_id, "healing", "Generating healing task suite")
+        _append_log(server_id, job_id, "healing", "Generating healing task suite")
         suite = generate_test_suite(
             manifest=cleaned_manifest,
             min_tasks=8,
@@ -369,6 +451,7 @@ def run_heal_only(self, server_id: str, job_id: str) -> dict:
         )
         stable_sample = select_stable_sample(healing_tasks, n=2)
         _append_log(
+            server_id,
             job_id,
             "healing",
             f"Task suite: {len(healing_tasks)} healing, {len(held_out_tasks)} held-out",
@@ -377,12 +460,13 @@ def run_heal_only(self, server_id: str, job_id: str) -> dict:
         eval_fn_iteration = make_eval_fn(runs_per_task=1)
         eval_fn_confirm = make_eval_fn(runs_per_task=3)
 
-        _append_log(job_id, "healing", "Running initial eval on healing set")
+        _append_log(server_id, job_id, "healing", "Running initial eval on healing set")
         initial_report = run_eval_report(
             cleaned_manifest, healing_tasks, runs_per_task=1
         )
 
         _append_log(
+            server_id,
             job_id,
             "healing",
             f"Starting healing loop (max_iterations={settings.HEAL_MAX_ITERATIONS})",
@@ -406,19 +490,21 @@ def run_heal_only(self, server_id: str, job_id: str) -> dict:
                 else it.reason
             )
             _append_log(
+                server_id,
                 job_id,
                 "healing",
                 f"iteration {it.iteration}: tool={it.tool_name} {outcome} ({detail})",
             )
 
         _append_log(
+            server_id,
             job_id,
             "healing",
             f"Healing loop stopped: {run_result.stop_reason.value} "
             f"({len(run_result.tools_attempted)} tool(s) attempted)",
         )
 
-        _append_log(job_id, "healing", "Running final held-out confirmation")
+        _append_log(server_id, job_id, "healing", "Running final held-out confirmation")
         overfit_result = check_overfit(
             cleaned_manifest,
             run_result.final_manifest,
@@ -426,10 +512,20 @@ def run_heal_only(self, server_id: str, job_id: str) -> dict:
             eval_fn=eval_fn_confirm,
         )
         _append_log(
+            server_id,
             job_id,
             "healing",
             f"Held-out confirmation: {overfit_result.held_out_score_before:.1f} -> "
             f"{overfit_result.held_out_score_after:.1f} ({overfit_result.verdict})",
+        )
+        log_change(
+            server_id, job_id, "score_healed",
+            **{
+                "from": overfit_result.held_out_score_before,
+                "to": overfit_result.held_out_score_after,
+                "method": "held_out_confirmation",
+                "verdict": overfit_result.verdict,
+            },
         )
 
         healing_meta = {
@@ -460,19 +556,26 @@ def run_heal_only(self, server_id: str, job_id: str) -> dict:
             "ran_at": _ts(),
         }
 
-        _append_log(job_id, "saving", "Persisting healing results to database")
+        _append_log(server_id, job_id, "saving", "Persisting healing results to database")
+        old_server_status = None
         with sync_db_session() as db:
             server = db.execute(
                 select(Server).where(Server.id == server_id)
             ).scalar_one_or_none()
             if server:
+                old_server_status = server.status
                 server.healed_manifest = run_result.final_manifest
                 server.score_healed = overfit_result.held_out_score_after
                 server.healing_meta = healing_meta
                 server.status = ServerStatus.READY
+        if server and old_server_status != ServerStatus.READY:
+            log_change(
+                server_id, job_id, "server_status",
+                **{"from": old_server_status.value, "to": ServerStatus.READY.value},
+            )
 
-        _set_job(job_id, JobStatus.DONE)
-        _append_log(job_id, "done", f"Healing complete ✓  {overfit_result.verdict}")
+        _set_job(server_id, job_id, JobStatus.DONE)
+        _append_log(server_id, job_id, "done", f"Healing complete ✓  {overfit_result.verdict}")
 
         log.info(
             "Heal done: server=%s verdict=%s tools_attempted=%d",
@@ -494,9 +597,9 @@ def run_heal_only(self, server_id: str, job_id: str) -> dict:
         log.exception("Heal failed: server=%s job=%s", server_id[:8], job_id[:8])
         err_msg = str(exc)
 
-        _set_job(job_id, JobStatus.FAILED, error=err_msg)
-        _set_server_status(server_id, ServerStatus.ERROR)
-        _append_log(job_id, "failed", f"Healing failed: {err_msg}")
+        _set_job(server_id, job_id, JobStatus.FAILED, error=err_msg)
+        _set_server_status(server_id, job_id, ServerStatus.ERROR)
+        _append_log(server_id, job_id, "failed", f"Healing failed: {err_msg}")
         transient = any(
             k in err_msg.lower()
             for k in ("rate limit", "quota", "timeout", "connection", "503", "429")

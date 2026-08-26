@@ -128,7 +128,6 @@ PlugFit - Resources.md
 session.md
 agents.md
 tmp
-plugfit/app/job/run_logs.py
 scripts/sanity_check_eval.py
 test
 scripts/measure_eval_variance.py
