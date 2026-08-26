@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any
@@ -140,13 +141,14 @@ async def mcp_post(
 
     if isinstance(body, list):
         log.debug(f"MCP batch request with {len(body)} messages")
-        responses = [session.dispatch(msg) for msg in body]
+        responses = await asyncio.gather(
+            *(asyncio.to_thread(session.dispatch, msg) for msg in body)
+        )
         responses = [r for r in responses if r is not None]
         return JSONResponse(responses)
 
-    response = session.dispatch(body)
+    response = await asyncio.to_thread(session.dispatch, body)
     if response is None:
-        # Notification — 202 No Content
         log.debug("MCP notification processed")
         return Response(status_code=202)
 

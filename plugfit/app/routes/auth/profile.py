@@ -57,7 +57,9 @@ async def update_current_user(
         logger.info(f"Email updated for user: {current_user.email} -> {payload.email}")
     if payload.name:
         slug = make_slug(payload.name)
-        result = await db.execute(select(User).where(User.slug == slug))
+        result = await db.execute(
+            select(User).where(User.slug == slug, User.id != current_user.id)
+        )
         if result.scalar_one_or_none():
             slug = f"{slug}-{secrets.token_hex(4)}"
         current_user.name = payload.name

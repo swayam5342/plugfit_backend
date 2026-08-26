@@ -12,10 +12,14 @@ POST /servers/{id}/heal      - Run the self-healing loop on the cleaned manifest
 DELETE /servers/{id}         — delete a server
 """
 
+import asyncio
+import ipaddress
 import json
 import logging
 import re
+import socket
 from typing import Tuple
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import Result, select
@@ -68,6 +72,39 @@ async def _unique_server_slug(name: str, tenant_id: str, db: AsyncSession) -> st
     if result.scalar_one_or_none():
         slug = f"{slug[:51]}-{secrets.token_hex(4)}"
     return slug
+
+
+async def _validate_spec_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(400, detail="spec_url must be http:// or https://")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(400, detail="spec_url must include a hostname")
+
+    try:
+        loop = asyncio.get_event_loop()
+        infos = await loop.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise HTTPException(400, detail=f"Could not resolve spec_url host: {exc}")
+
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise HTTPException(
+                400,
+                detail=(
+                    f"spec_url resolves to a non-public address ({ip}) — not allowed"
+                ),
+            )
 
 
 async def _get_server_for_tenant(
@@ -165,6 +202,7 @@ async def create_server(
 
     else:
         logger.debug(f"Processing spec from URL: {spec_url}")
+        await _validate_spec_url(spec_url)  # type: ignore[arg-type]
         ingest_input = spec_url
         raw_spec = spec_url
     headers: dict = {}
@@ -179,7 +217,7 @@ async def create_server(
                 detail="upstream_headers must be valid JSON",
             )
     try:
-        manifest = ingest(ingest_input)  # type:ignore
+        manifest = await asyncio.to_thread(ingest, ingest_input)  # type:ignore
     except Exception as e:
         logger.warning(f"Server creation failed - spec parsing error: {str(e)}")
         raise HTTPException(
