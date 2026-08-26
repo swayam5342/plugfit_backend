@@ -292,6 +292,18 @@ class Server(Base):
         MutableDict.as_mutable(JSON),
         nullable=True,
     )
+    healed_manifest: Mapped[dict | None] = mapped_column(
+        MutableDict.as_mutable(JSON),
+        nullable=True,
+    )
+    score_healed: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    healing_meta: Mapped[dict | None] = mapped_column(
+        MutableDict.as_mutable(JSON),
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -317,3 +317,190 @@ def run_eval_only(self, server_id: str, job_id: str) -> dict:
         if transient:
             raise self.retry(exc=exc)
         raise
+
+
+@celery_app.task(
+    name="plugfit.platform.jobs.tasks.run_heal_only",
+    bind=True,
+    max_retries=settings.PIPELINE_MAX_RETRY,
+    default_retry_delay=settings.PIPELINE_TIMEOUT_SECONDS,
+    acks_late=True,
+)
+def run_heal_only(self, server_id: str, job_id: str) -> dict:
+    log.info("Heal started: server=%s job=%s", server_id[:8], job_id[:8])
+    _set_job(job_id, JobStatus.RUNNING)
+
+    try:
+        _append_log(job_id, "loading", "Loading server manifest from database")
+        with sync_db_session() as db:
+            server = db.execute(
+                select(Server).where(Server.id == server_id)
+            ).scalar_one_or_none()
+            if not server:
+                raise RuntimeError(f"Server {server_id} not found in database")
+
+            cleaned_manifest = server.cleaned_manifest
+
+        if not cleaned_manifest:
+            raise RuntimeError(
+                "Server has no cleaned_manifest — run the full pipeline first"
+            )
+
+        from plugfit.app.eval.test_gen import generate_test_suite
+        from plugfit.app.job.healing_eval import make_eval_fn, run_eval_report
+        from plugfit.app.job.healing_holdout import (
+            check_overfit,
+            select_stable_sample,
+            split_holdout,
+        )
+        from plugfit.app.job.healing_loop import run_healing_loop
+
+        _append_log(job_id, "healing", "Generating healing task suite")
+        suite = generate_test_suite(
+            manifest=cleaned_manifest,
+            min_tasks=8,
+            trap_count=2,
+            gemini_api_key=settings.GEMINI_API_KEY,
+        )
+        healing_tasks, held_out_tasks = split_holdout(
+            suite.tasks,
+            ratio=settings.HEAL_HOLDOUT_RATIO,
+            min_holdout=settings.HEAL_MIN_HOLDOUT,
+        )
+        stable_sample = select_stable_sample(healing_tasks, n=2)
+        _append_log(
+            job_id,
+            "healing",
+            f"Task suite: {len(healing_tasks)} healing, {len(held_out_tasks)} held-out",
+        )
+
+        eval_fn_iteration = make_eval_fn(runs_per_task=1)
+        eval_fn_confirm = make_eval_fn(runs_per_task=3)
+
+        _append_log(job_id, "healing", "Running initial eval on healing set")
+        initial_report = run_eval_report(
+            cleaned_manifest, healing_tasks, runs_per_task=1
+        )
+
+        _append_log(
+            job_id,
+            "healing",
+            f"Starting healing loop (max_iterations={settings.HEAL_MAX_ITERATIONS})",
+        )
+        run_result = run_healing_loop(
+            cleaned_manifest,
+            healing_tasks,
+            initial_report.task_results,
+            stable_sample,
+            eval_fn=eval_fn_iteration,
+            max_iterations=settings.HEAL_MAX_ITERATIONS,
+            accept_threshold=settings.HEAL_ACCEPT_THRESHOLD,
+            non_improving_stop=settings.HEAL_NON_IMPROVING_STOP,
+        )
+
+        for it in run_result.iterations:
+            outcome = "accepted" if it.accepted else "reverted"
+            detail = (
+                f"{it.baseline_score:.1f} -> {it.candidate_score:.1f}"
+                if it.candidate_score is not None
+                else it.reason
+            )
+            _append_log(
+                job_id,
+                "healing",
+                f"iteration {it.iteration}: tool={it.tool_name} {outcome} ({detail})",
+            )
+
+        _append_log(
+            job_id,
+            "healing",
+            f"Healing loop stopped: {run_result.stop_reason.value} "
+            f"({len(run_result.tools_attempted)} tool(s) attempted)",
+        )
+
+        _append_log(job_id, "healing", "Running final held-out confirmation")
+        overfit_result = check_overfit(
+            cleaned_manifest,
+            run_result.final_manifest,
+            held_out_tasks,
+            eval_fn=eval_fn_confirm,
+        )
+        _append_log(
+            job_id,
+            "healing",
+            f"Held-out confirmation: {overfit_result.held_out_score_before:.1f} -> "
+            f"{overfit_result.held_out_score_after:.1f} ({overfit_result.verdict})",
+        )
+
+        healing_meta = {
+            "healing_set_size": len(healing_tasks),
+            "held_out_size": len(held_out_tasks),
+            "stop_reason": run_result.stop_reason.value,
+            "tools_attempted": run_result.tools_attempted,
+            "iterations": [
+                {
+                    "iteration": it.iteration,
+                    "tool_id": it.tool_id,
+                    "tool_name": it.tool_name,
+                    "old_description": it.old_description,
+                    "new_description": it.new_description,
+                    "baseline_score": it.baseline_score,
+                    "candidate_score": it.candidate_score,
+                    "accepted": it.accepted,
+                    "single_sample": it.single_sample,
+                    "reason": it.reason,
+                }
+                for it in run_result.iterations
+            ],
+            "initial_healing_score": initial_report.score,
+            "held_out_score_before": overfit_result.held_out_score_before,
+            "held_out_score_after": overfit_result.held_out_score_after,
+            "overfit": overfit_result.overfit,
+            "verdict": overfit_result.verdict,
+            "ran_at": _ts(),
+        }
+
+        _append_log(job_id, "saving", "Persisting healing results to database")
+        with sync_db_session() as db:
+            server = db.execute(
+                select(Server).where(Server.id == server_id)
+            ).scalar_one_or_none()
+            if server:
+                server.healed_manifest = run_result.final_manifest
+                server.score_healed = overfit_result.held_out_score_after
+                server.healing_meta = healing_meta
+                server.status = ServerStatus.READY
+
+        _set_job(job_id, JobStatus.DONE)
+        _append_log(job_id, "done", f"Healing complete ✓  {overfit_result.verdict}")
+
+        log.info(
+            "Heal done: server=%s verdict=%s tools_attempted=%d",
+            server_id[:8],
+            overfit_result.verdict,
+            len(run_result.tools_attempted),
+        )
+
+        return {
+            "server_id": server_id,
+            "stop_reason": run_result.stop_reason.value,
+            "tools_attempted": run_result.tools_attempted,
+            "held_out_score_before": overfit_result.held_out_score_before,
+            "held_out_score_after": overfit_result.held_out_score_after,
+            "verdict": overfit_result.verdict,
+        }
+
+    except Exception as exc:
+        log.exception("Heal failed: server=%s job=%s", server_id[:8], job_id[:8])
+        err_msg = str(exc)
+
+        _set_job(job_id, JobStatus.FAILED, error=err_msg)
+        _set_server_status(server_id, ServerStatus.ERROR)
+        _append_log(job_id, "failed", f"Healing failed: {err_msg}")
+        transient = any(
+            k in err_msg.lower()
+            for k in ("rate limit", "quota", "timeout", "connection", "503", "429")
+        )
+        if transient:
+            raise self.retry(exc=exc)
+        raise

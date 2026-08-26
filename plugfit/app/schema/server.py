@@ -26,6 +26,7 @@ class ServerOut(BaseModel):
     score_before: float | None
     score_after: float | None
     score_method: str | None = None
+    score_healed: float | None = None
     tool_count_before: int | None
     tool_count_after: int | None
     base_url: str | None

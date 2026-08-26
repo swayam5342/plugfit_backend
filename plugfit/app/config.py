@@ -68,9 +68,19 @@ class Settings(BaseSettings):
 
     MCP_BASE_PATH: str = Field(default="mcp")
 
-    AI_MODEL_NAME: str = Field(default="gemini-flash-latest")
+    AI_MODEL_NAME: str = Field(default="gemini-3.5-flash-lite")
 
     ENABLE_FILE_LOGGING: bool = Field(default=True)
+
+    HEAL_MAX_ITERATIONS: int = Field(default=3)
+
+    HEAL_ACCEPT_THRESHOLD: float = Field(default=19.2)
+
+    HEAL_NON_IMPROVING_STOP: int = Field(default=2)
+
+    HEAL_HOLDOUT_RATIO: float = Field(default=0.25)
+
+    HEAL_MIN_HOLDOUT: int = Field(default=2)
 
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "*"]

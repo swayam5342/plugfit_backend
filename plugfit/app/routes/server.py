@@ -8,6 +8,7 @@ GET  /servers/{id}/diff      — before/after tool manifest diff
 GET  /servers/{id}/jobs      — job history for a server
 POST /servers/{id}/reprocess — re-run the pipeline (after spec update)
 POST /servers/{id}/eval      — re-run just the MCP eval (rate-limited)
+POST /servers/{id}/heal      - Run the self-healing loop on the cleaned manifest
 DELETE /servers/{id}         — delete a server
 """
 
@@ -31,7 +32,7 @@ from plugfit.app.models.models import (
     User,
 )
 from plugfit.app.db.db import get_db
-from plugfit.app.job.tasks import run_eval_only, run_pipeline
+from plugfit.app.job.tasks import run_eval_only, run_heal_only, run_pipeline
 from plugfit.app.schema.server import (
     JobOut,
     ManifestDiff,
@@ -41,8 +42,11 @@ from plugfit.app.schema.server import (
 )
 from plugfit.app.utils.rate_limit import rate_limit
 
-EVAL_RATE_LIMIT = 3  # evals
-EVAL_RATE_WINDOW = 60 * 60  # per hour, per user per server
+EVAL_RATE_LIMIT = 3
+EVAL_RATE_WINDOW = 60 * 60
+
+HEAL_RATE_LIMIT = 1
+HEAL_RATE_WINDOW = 60 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +451,50 @@ async def trigger_eval(
     return JobOut.model_validate(job)
 
 
+@router.post(
+    "/{server_id}/heal",
+    response_model=JobOut,
+    summary="Run the self-healing loop on the cleaned manifest",
+    dependencies=[
+        Depends(
+            rate_limit(
+                lambda request,
+                tenant: f"heal:{tenant.id}:{request.path_params['server_id']}",
+                limit=HEAL_RATE_LIMIT,
+                window_seconds=HEAL_RATE_WINDOW,
+            )
+        )
+    ],
+)
+async def trigger_heal(
+    server_id: str,
+    tenant: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    logger.info(f"Heal request for server: {server_id}, user_id: {tenant.id}")
+    server = await _get_server_for_tenant(server_id, tenant, db)
+
+    if server.status == ServerStatus.PROCESSING:
+        logger.warning(f"Heal failed - pipeline already running: {server_id}")
+        raise HTTPException(409, detail="Pipeline already running for this server")
+
+    if not server.cleaned_manifest:
+        raise HTTPException(
+            409,
+            detail="Server has no cleaned manifest yet — run the full pipeline first",
+        )
+
+    server.status = ServerStatus.PROCESSING
+    job = Job(server_id=server.id, status=JobStatus.PENDING, stage="pending")
+    db.add(job)
+    await db.flush()
+    await db.commit()
+    await db.refresh(job)
+    run_heal_only.delay(server.id, job.id)  # type:ignore
+    logger.info(f"Heal initiated - server: {server_id}, job_id: {job.id}")
+    return JobOut.model_validate(job)
+
+
 @router.delete(
     "/{server_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -475,6 +523,7 @@ def _server_out(server: Server) -> ServerOut:
         score_before=server.score_before,
         score_after=server.score_after,
         score_method=server.score_method,
+        score_healed=server.score_healed,
         tool_count_before=server.tool_count_before,
         tool_count_after=server.tool_count_after,
         base_url=server.base_url,
